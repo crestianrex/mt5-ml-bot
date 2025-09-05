@@ -102,7 +102,7 @@ class MLStrategy(Strategy):
         self.cv_auc_ = float(np.mean(scores)) if scores else None
 
         if self.calibrate:
-            self._calibrator = CalibratedClassifierCV(self._pipe.named_steps["clf"], cv="prefit", method="isotonic")
+            self._calibrator = CalibratedClassifierCV(estimator=self._pipe.named_steps["clf"], cv=None, method="isotonic")
             self._calibrator.fit(Xc, yc)
         return self
 

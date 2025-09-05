@@ -80,7 +80,7 @@ class Ensemble:
             # Optional isotonic calibration for stacking output
             p_meta = self._stacker.predict_proba(P.values)[:, 1]
             self._meta_calibrator = IsotonicRegression(out_of_bounds='clip')
-            self._meta_calibrator.fit(p_meta, y.loc[P.index].values)
+            self._meta_calibrator.fit(p_meta, y.loc[P.index])
             logger.info("Meta-model isotonic calibration complete.")
 
         return self
