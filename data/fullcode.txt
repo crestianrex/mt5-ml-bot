@@ -1,0 +1,1111 @@
+# config_m5.yaml
+symbols: ["EURUSD#", "USDJPY#", "GBPUSD#", "AUDUSD#", "USDCAD#", "USDCHF#", "EURJPY#", "EURGBP#"]
+timeframe: "M5" # One of: M1, M5, M15, M30, H1, H4
+history_bars: 4000        # ~14 days of M5 bars
+retrain_every_bars: 288   # retrain every ~24 hours
+prediction_horizon: 6     # ~30 minutes ahead
+
+# Feature params
+features:
+  rsi_period: 14
+  ema_fast: 12
+  ema_slow: 26
+  window_vol: 20
+  roc_lags: [1, 3, 5, 10]
+
+# Models (base learners)
+models:
+  - name: lgbm
+    params: {n_estimators: 400, learning_rate: 0.03, subsample: 0.8, colsample_bytree: 0.8}
+  - name: xgb
+    params: {n_estimators: 400, learning_rate: 0.05, subsample: 0.8, colsample_bytree: 0.8, max_depth: 5}
+  - name: rf
+    params: {n_estimators: 400, max_depth: 8, min_samples_leaf: 3}
+  - name: logreg
+    params: {}
+
+# Ensemble
+ensemble:
+  method: stacking
+  weights: {lgbm: 0.35, xgb: 0.35, rf: 0.2, logreg: 0.1}
+  meta: {type: "logit", C: 1.0}
+
+# Risk
+risk:
+  risk_per_trade: 0.003
+  max_positions: 3
+  atr_multiplier_sl: 1.5
+  atr_multiplier_tp: 2.5
+  trailing_atr_mult: 1.0
+  min_prob_long: 0.60
+  min_prob_short: 0.60
+  block_on_drawdown: 0.1
+  session_filter:
+    start: "07:00"
+    end: "22:00"
+
+logging:
+  level: INFO
+  to_file: true
+  rotate: 10 MB
+  retention: 7 days
+
+
+# config_m15.yaml
+symbols: ["EURUSD#", "USDJPY#", "GBPUSD#", "AUDUSD#", "USDCAD#", "USDCHF#", "EURJPY#", "EURGBP#"]
+timeframe: "M15"
+history_bars: 2000        # ~21 days of M15 bars
+retrain_every_bars: 96    # retrain every ~24 hours
+prediction_horizon: 3     # ~45 minutes ahead
+
+# Feature params
+features:
+  rsi_period: 14
+  ema_fast: 12
+  ema_slow: 26
+  window_vol: 20
+  roc_lags: [1, 3, 5, 10]
+
+# Models (base learners)
+models:
+  - name: lgbm
+    params: {n_estimators: 400, learning_rate: 0.03, subsample: 0.8, colsample_bytree: 0.8}
+  - name: xgb
+    params: {n_estimators: 400, learning_rate: 0.05, subsample: 0.8, colsample_bytree: 0.8, max_depth: 5}
+  - name: rf
+    params: {n_estimators: 400, max_depth: 8, min_samples_leaf: 3}
+  - name: logreg
+    params: {}
+
+# Ensemble
+ensemble:
+  method: stacking
+  weights: {lgbm: 0.35, xgb: 0.35, rf: 0.2, logreg: 0.1}
+  meta: {type: "logit", C: 1.0}
+
+# Risk
+risk:
+  risk_per_trade: 0.005
+  max_positions: 3
+  atr_multiplier_sl: 1.5
+  atr_multiplier_tp: 2.5
+  trailing_atr_mult: 1.0
+  min_prob_long: 0.55
+  min_prob_short: 0.55
+  block_on_drawdown: 0.1
+  session_filter:
+    start: "07:00"
+    end: "22:00"
+
+logging:
+  level: INFO
+  to_file: true
+  rotate: 10 MB
+  retention: 7 days
+
+
+## main.py — live loop (simplified)
+from __future__ import annotations
+import os
+import time
+import pandas as pd
+from dotenv import load_dotenv
+from loguru import logger
+import pickle
+import MetaTrader5 as mt5
+
+from src.config import Cfg, FeatureCfg
+from src.mt5_client import MT5Client
+from src.data import fetch_bars, merge_features_labels
+from src.features import build_features
+from src.labels import binary_up_down
+from src.ensemble import Ensemble
+from src.risk import RiskManager
+from src.execution import Execution
+from src.utils import setup_logging
+
+load_dotenv()
+PARAMS_DIR = "optuna_params"
+
+def load_optuna_params(symbol: str) -> dict | None:
+    file_path = os.path.join(PARAMS_DIR, f"{symbol.replace('#','')}_best_params.pkl")
+    if os.path.exists(file_path):
+        with open(file_path, "rb") as f:
+            best_params_flat = pickle.load(f)
+        model_params = {"lgbm": {}, "xgb": {}, "rf": {}, "logreg": {}}
+        for k, v in best_params_flat.items():
+            for model_name in model_params:
+                if k.startswith(model_name):
+                    model_params[model_name][k[len(model_name)+1:]] = v
+        logger.info(f"[{symbol}] Loaded Optuna params: {model_params}")
+        return model_params
+    logger.warning(f"[{symbol}] No Optuna params found at {file_path}")
+    return None
+
+def run():
+    cfg = Cfg.from_yaml("config.yaml")
+    setup_logging(**cfg.logging)
+    logger.info("=== Starting MT5 ML Bot ===")
+
+    mt5c = MT5Client(os.getenv("MT5_LOGIN"), os.getenv("MT5_PASSWORD"),
+                     os.getenv("MT5_SERVER"), os.getenv("MT5_PATH") or None)
+    if not mt5c.connect():
+        logger.error("MT5 connection failed. Exiting.")
+        return
+
+    feat_cfg = FeatureCfg(**cfg.features.__dict__)
+    ens_per_symbol = {}
+    all_model_params = {sym: load_optuna_params(sym) for sym in cfg.symbols}
+    last_bar_time = {sym: None for sym in cfg.symbols}  # track last bar time
+
+    try:
+        while True:
+            for sym in cfg.symbols:
+                try:
+                    df = fetch_bars(sym, cfg.timeframe, cfg.history_bars)
+                    latest_bar_time = df.index[-1]
+
+                    # Only compute features & trade if this is a new bar
+                    if last_bar_time[sym] != latest_bar_time:
+                        logger.info(f"[{sym}] New bar detected at {latest_bar_time}")
+                        last_bar_time[sym] = latest_bar_time
+
+                        # --- build features with sentiment included ---
+                        X = build_features(df, feat_cfg, symbol=sym, timeframe_minutes=cfg.timeframe)
+                        y = binary_up_down(df, cfg.prediction_horizon)
+                        data = merge_features_labels(df, X, y)
+                        logger.debug(f"[{sym}] Features shape: {X.shape}, Labels shape: {y.shape}")
+
+                        # --- train/retrain ensemble if needed ---
+                        if sym not in ens_per_symbol or len(df) % cfg.retrain_every_bars == 0:
+                            logger.info(f"[{sym}] Training/retraining ensemble...")
+                            model_params = all_model_params.get(sym)
+                            ens = Ensemble(cfg, model_params=model_params)
+                            ens.fit(data.drop(columns=["y","close","high","low","volume"]), data["y"])
+                            ens_per_symbol[sym] = ens
+                            logger.info(f"[{sym}] Ensemble trained with members: {list(ens.members.keys())}")
+
+                        ens = ens_per_symbol[sym]
+                        last_features = X.iloc[[-1]]
+                        atr = X["atr_14"].iloc[-1]
+
+                        # --- execute trades ---
+                        risk = RiskManager(cfg.risk)
+                        exe = Execution(ens, risk)
+                        exe.manage_trades(sym, atr)
+                        result = exe.trade(sym, last_features, atr)
+                        if result.ok:
+                            logger.info(f"[{sym}] Trade executed successfully: ticket={result.ticket}")
+                        else:
+                            logger.info(f"[{sym}] Trade skipped or failed: {result.message}")
+
+                except Exception as e:
+                    logger.exception(f"[{sym}] error: {e}")
+
+            time.sleep(1)  # short sleep to prevent tight loop
+
+    except KeyboardInterrupt:
+        logger.info("=== Stopping MT5 ML Bot (KeyboardInterrupt) ===")
+    finally:
+        mt5c.shutdown()
+        logger.info("MT5 shutdown complete")
+
+if __name__ == "__main__":
+    run()
+
+
+### `src/utils.py`
+
+from loguru import logger
+import sys
+
+def setup_logging(level="INFO", to_file=True, rotate="10 MB", retention="7 days"):
+    logger.remove()
+    logger.add(sys.stderr, level=level)
+    if to_file:
+        logger.add("logs/bot.log", level=level, rotation=rotate, retention=retention)
+
+
+### `src/trainer.py`
+
+from __future__ import annotations
+import joblib
+from pathlib import Path
+from .ensemble import Ensemble
+
+class Trainer:
+    def __init__(self, cfg):
+        self.cfg = cfg
+
+    def fit_save(self, X, y, outdir: str = "models"):
+        ens = Ensemble(self.cfg)
+        ens.fit(X, y)
+        Path(outdir).mkdir(parents=True, exist_ok=True)
+        joblib.dump(ens, f"{outdir}/ensemble.pkl")
+        return ens
+
+    @staticmethod
+    def load(path: str = "models/ensemble.pkl"):
+        return joblib.load(path)
+
+
+### `src/backtest.py`
+
+from __future__ import annotations
+import pandas as pd
+import numpy as np
+
+class Backtester:
+    def __init__(self, ensemble, risk_mgr, horizon: int):
+        self.ens = ensemble
+        self.risk = risk_mgr
+        self.h = horizon
+
+    def walk_forward(self, df: pd.DataFrame, X: pd.DataFrame, y: pd.Series, step: int = 250, start: int = 500):
+        equity = 10000.0
+        peak = equity
+        curve = []
+        i = start
+        while i < len(X) - self.h:
+            Xtr, ytr = X.iloc[:i], y.iloc[:i]
+            Xte = X.iloc[i:i+step]
+            self.ens.fit(Xtr, ytr)
+            p = self.ens.predict_proba(Xte)
+            # simple strategy: long if p>=0.55, short if p<=0.45, else flat
+            ret = df["close"].pct_change(self.h).shift(-self.h).loc[p.index]
+            sig = np.where(p >= 0.55, 1, np.where(p <= 0.45, -1, 0))
+            pnl = sig * ret
+            equity *= (1 + np.nanmean(pnl))
+            peak = max(peak, equity)
+            curve.append((Xte.index[-1], equity, (peak - equity)/peak))
+            i += step
+        ec = pd.DataFrame(curve, columns=["time","equity","dd"]).set_index("time")
+        return ec
+
+
+# src\execution.py
+from __future__ import annotations
+from dataclasses import dataclass
+import MetaTrader5 as mt5
+from loguru import logger
+import numpy as np
+from .ensemble import Ensemble
+from .risk import RiskManager
+
+@dataclass
+class OrderResult:
+    ok: bool
+    ticket: int | None
+    message: str
+
+class Execution:
+    def __init__(self, ensemble: Ensemble, risk_manager: RiskManager):
+        """
+        ensemble: trained Ensemble with isotonic calibration
+        risk_manager: RiskManager instance handling lot sizing & SL/TP
+        """
+        self.ens = ensemble
+        self.risk = risk_manager
+
+    def trade(self, symbol: str, X: np.ndarray | None = None, atr: float | None = None) -> OrderResult:
+        """Make autonomous trade decision and execute."""
+        if X is None or atr is None:
+            logger.warning(f"[{symbol}] Trade skipped: missing X or ATR")
+            return OrderResult(False, None, "X and ATR required")
+
+        prob_up = self.ens.predict_proba(X.iloc[[-1]]).iloc[0]
+
+        # --- decide direction ---
+        direction = None
+        if prob_up >= self.risk.cfg.min_prob_long:
+            direction = "long"
+        elif (1 - prob_up) >= self.risk.cfg.min_prob_short:
+            direction = "short"
+
+        if direction is None:
+            logger.info(f"[{symbol}] No trade executed. p_up={prob_up:.3f}")
+            return OrderResult(False, None, f"No trade: p_up={prob_up:.3f}")
+
+        # --- fetch account & symbol info ---
+        account_info = mt5.account_info()
+        if not account_info:
+            logger.error(f"[{symbol}] Account info unavailable")
+            return OrderResult(False, None, "Account info unavailable")
+        equity = account_info.equity
+
+        symbol_info = mt5.symbol_info(symbol)
+        if not symbol_info:
+            logger.error(f"[{symbol}] Symbol info unavailable")
+            return OrderResult(False, None, "Symbol info unavailable")
+
+        pip_size = symbol_info.point
+        pip_value = pip_size * symbol_info.trade_contract_size
+
+        # --- compute lot size ---
+        lots = self.risk.position_size(equity, atr, pip_value, pip_size)
+        logger.debug(f"[{symbol}] Computed lots={lots:.2f} | equity={equity:.2f}, ATR={atr:.5f}, pip_value={pip_value:.5f}")
+
+        if lots <= 0:
+            logger.info(f"[{symbol}] Computed lots <= 0, skipping trade")
+            return OrderResult(False, None, "Computed lots <= 0")
+
+        # --- initial SL/TP ---
+        tick = mt5.symbol_info_tick(symbol)
+        price = tick.ask if direction == "long" else tick.bid
+        sl, tp = self.risk.stop_targets(price, atr, direction)
+        logger.debug(f"[{symbol}] Prepared trade: dir={direction}, price={price:.5f}, SL={sl:.5f}, TP={tp:.5f}")
+
+        # --- send order ---
+        type_map = {"long": mt5.ORDER_TYPE_BUY, "short": mt5.ORDER_TYPE_SELL}
+        request = {
+            "action": mt5.TRADE_ACTION_DEAL,
+            "symbol": symbol,
+            "volume": lots,
+            "type": type_map[direction],
+            "price": price,
+            "sl": sl,
+            "tp": tp,
+            "deviation": 10,
+            "magic": 424242,
+            "comment": "ml-bot",
+            "type_time": mt5.ORDER_TIME_GTC,
+            "type_filling": mt5.ORDER_FILLING_IOC,
+        }
+
+        result = mt5.order_send(request)
+        if result is None or result.retcode != mt5.TRADE_RETCODE_DONE:
+            msg = str(result) if result else "MT5 order_send returned None"
+            logger.error(f"[{symbol}] Order failed: {msg}")
+            return OrderResult(False, None, msg)
+
+        logger.info(f"[{symbol}] Order executed: ticket={result.order}, dir={direction}, lots={lots}, SL={sl}, TP={tp}")
+        return OrderResult(True, result.order, "OK")
+
+    def manage_trades(self, symbol: str, atr: float):
+        """Adjust SL for open trades (BE + ATR trailing)."""
+        logger.debug(f"[{symbol}] Managing open trades with ATR={atr}")
+        self.risk.manage_open_positions(symbol, atr)
+
+
+
+# src/risk.py
+from __future__ import annotations
+import pandas as pd
+import numpy as np
+import MetaTrader5 as mt5
+from loguru import logger
+from .config import RiskCfg
+
+class RiskManager:
+    def __init__(self, cfg: RiskCfg):
+        self.cfg = cfg
+        self.equity_peak = None
+
+    def position_size(self, equity: float, atr: float, pip_value: float, pip_size: float) -> float:
+        """Compute lot size based on equity, ATR stop distance, and risk per trade."""
+        risk_amt = equity * self.cfg.risk_per_trade
+        sl_distance = self.cfg.atr_multiplier_sl * atr
+        if sl_distance <= 0:
+            logger.warning(f"SL distance <= 0, cannot compute lots")
+            return 0.0
+        units = risk_amt / (sl_distance * pip_value)
+        lots = max(0.01, min(units * pip_size, 5.0))  # clamp between 0.01 and 5 lots
+        logger.debug(f"Position size: equity={equity:.2f}, ATR={atr:.5f}, pip_value={pip_value:.5f}, lots={lots:.2f}")
+        return round(lots, 2)
+
+    def stop_targets(self, price: float, atr: float, direction: str):
+        """Return initial SL and TP based on ATR multipliers."""
+        sl_mult = self.cfg.atr_multiplier_sl
+        tp_mult = self.cfg.atr_multiplier_tp
+        if direction == "long":
+            sl = price - sl_mult * atr
+            tp = price + tp_mult * atr
+        else:
+            sl = price + sl_mult * atr
+            tp = price - tp_mult * atr
+        logger.debug(f"Stop targets: dir={direction}, price={price:.5f}, SL={sl:.5f}, TP={tp:.5f}")
+        return sl, tp
+
+    def should_trade(self, now_local: pd.Timestamp, dd: float) -> bool:
+        """Check if trading is allowed (drawdown/session filters)."""
+        if dd >= self.cfg.block_on_drawdown:
+            logger.info(f"Trading blocked due to drawdown={dd:.3f}")
+            return False
+        sess = self.cfg.session_filter
+        if not sess:
+            return True
+        start = pd.to_datetime(sess["start"]).time()
+        end = pd.to_datetime(sess["end"]).time()
+        allowed = start <= now_local.time() <= end
+        if not allowed:
+            logger.info(f"Trading blocked: current time {now_local.time()} outside session {start}-{end}")
+        return allowed
+
+    def manage_open_positions(self, symbol: str, atr: float):
+        """
+        Adjust stop loss for open positions:
+        - Move SL to breakeven at 1R
+        - Trail SL by ATR * trailing_atr_mult
+        """
+        positions = mt5.positions_get(symbol=symbol)
+        if not positions:
+            logger.debug(f"[{symbol}] No open positions")
+            return
+
+        symbol_info = mt5.symbol_info(symbol)
+        if symbol_info is None:
+            logger.warning(f"[{symbol}] Symbol info unavailable for managing positions")
+            return
+
+        point = symbol_info.point
+        tick = mt5.symbol_info_tick(symbol)
+        if tick is None:
+            logger.warning(f"[{symbol}] Tick info unavailable for managing positions")
+            return
+
+        for pos in positions:
+            entry = pos.price_open
+            sl = pos.sl
+            direction = "long" if pos.type == mt5.ORDER_TYPE_BUY else "short"
+
+            # Compute profit in pips
+            if direction == "long":
+                profit_pips = (tick.bid - entry) / point
+            else:
+                profit_pips = (entry - tick.ask) / point
+
+            # 1R in pips
+            one_r = self.cfg.atr_multiplier_sl * atr / point
+
+            new_sl = sl
+
+            # --- move SL to breakeven at 1R ---
+            if direction == "long" and profit_pips >= one_r and sl < entry:
+                new_sl = entry
+            elif direction == "short" and profit_pips >= one_r and sl > entry:
+                new_sl = entry
+
+            # --- ATR trailing ---
+            trailing_atr = atr * self.cfg.trailing_atr_mult
+            if direction == "long":
+                new_sl = max(new_sl, tick.bid - trailing_atr)
+            else:
+                new_sl = min(new_sl, tick.ask + trailing_atr)
+            
+            # Update position if SL changed
+            if new_sl != sl:
+                request = {
+                    "action": mt5.TRADE_ACTION_SLTP,
+                    "position": pos.ticket,
+                    "sl": new_sl,
+                    "tp": pos.tp,
+                }
+                result = mt5.order_send(request)
+                if result is None or result.retcode != mt5.TRADE_RETCODE_DONE:
+                    logger.error(f"[{symbol}] SL/TP update failed for ticket {pos.ticket}: {result}")
+                else:
+                    logger.info(f"[{symbol}] SL/TP updated for ticket {pos.ticket}: new SL={new_sl:.5f}, TP={pos.tp}")
+            else:
+                logger.debug(f"[{symbol}] No SL adjustment needed for ticket {pos.ticket}")
+
+
+
+
+### src/ensemble.py
+from __future__ import annotations
+import pandas as pd
+import numpy as np
+from typing import Dict
+from .strategy_ml import MLStrategy
+from sklearn.isotonic import IsotonicRegression
+from loguru import logger
+
+class Ensemble:
+    def __init__(self, cfg, model_params: dict | None = None):
+        """
+        cfg: configuration object
+        model_params: optional per-symbol Optuna-tuned params, dict like:
+            {
+                "lgbm": {...},
+                "xgb": {...},
+                "rf": {...},
+                "logreg": {...}
+            }
+        """
+        self.cfg = cfg
+        self.members: Dict[str, MLStrategy] = {}
+        for m in cfg.models:
+            name = m["name"]
+            params = m.get("params", {}).copy()
+            if model_params and name in model_params:
+                params.update(model_params[name])
+            # Force calibrate=True inside MLStrategy for per-model isotonic
+            self.members[name] = MLStrategy(model=name, calibrate=True, **params)
+
+        self.method = cfg.ensemble.get("method", "soft_vote")
+        self.weights = cfg.ensemble.get("weights", {k: 1/len(self.members) for k in self.members})
+        self.meta = cfg.ensemble.get("meta", {"type": "logit", "C": 1.0})
+        self._stacker = None
+        self._meta_calibrator: IsotonicRegression | None = None
+
+    def fit(self, X: pd.DataFrame, y: pd.Series):
+        logger.info("Fitting ensemble members...")
+        """
+        Fit all member models and optionally fit stacking meta-model
+        """
+        Ps = []
+        for name, model in self.members.items():
+            model.fit(X, y)
+            p = model.predict_proba(X).rename(name)  # already calibrated
+            Ps.append(p)
+            logger.info(f"[{name}] Model fitted, CV AUC={getattr(model, 'cv_auc_', None):.4f}")
+
+        P = pd.concat(Ps, axis=1)
+
+        if self.method == "stacking":
+            from sklearn.linear_model import LogisticRegression
+            self._stacker = LogisticRegression(C=self.meta.get("C", 1.0), max_iter=200)
+            self._stacker.fit(P.values, y.loc[P.index].values)
+            logger.info("Stacking meta-model fitted.")
+
+            # Optional isotonic calibration for stacking output
+            p_meta = self._stacker.predict_proba(P.values)[:, 1]
+            self._meta_calibrator = IsotonicRegression(out_of_bounds='clip')
+            self._meta_calibrator.fit(p_meta, y.loc[P.index].values)
+            logger.info("Meta-model isotonic calibration complete.")
+
+        return self
+
+    def predict_proba(self, X: pd.DataFrame) -> pd.Series:
+        """
+        Return calibrated probability of "up" for ensemble
+        """
+        Pcols = [m.predict_proba(X).rename(n) for n, m in self.members.items()]
+        P = pd.concat(Pcols, axis=1)
+        logger.debug(f"Ensemble predicting: input shape={X.shape}, member probs shape={P.shape}")
+
+        if self.method == "soft_vote":
+            w = np.array([self.weights.get(k, 1.0) for k in P.columns], dtype=float)
+            w /= w.sum()
+            p_final = (P.values * w).sum(axis=1)
+
+        elif self.method == "stacking" and self._stacker is not None:
+            p_final = self._stacker.predict_proba(P.values)[:, 1]
+            if self._meta_calibrator is not None:
+                p_final = self._meta_calibrator.transform(p_final)
+
+        elif self.method == "risk_weighted":
+            eps = 1e-9
+            mus = P.rolling(200).mean()
+            sig = P.rolling(200).std()
+            score = (mus / (sig + eps)).iloc[-1].fillna(0.0)
+            w = (score.clip(lower=0) + eps).values
+            if w.sum() == 0:
+                w = np.ones_like(w)
+            w /= w.sum()
+            p_final = (P.values * w).sum(axis=1)
+
+        else:
+            p_final = P.mean(axis=1).values
+
+        return pd.Series(p_final, index=P.index, name="p_up")
+
+
+### `src/strategy_ml.py` (extended to keep your API and add calibration)
+
+from __future__ import annotations
+import pandas as pd
+import numpy as np
+from sklearn.ensemble import RandomForestClassifier
+from sklearn.linear_model import SGDClassifier, LogisticRegression
+from sklearn.model_selection import TimeSeriesSplit
+from sklearn.metrics import roc_auc_score
+from sklearn.calibration import CalibratedClassifierCV
+from sklearn.preprocessing import StandardScaler
+from sklearn.pipeline import Pipeline
+from loguru import logger
+
+try:
+    from xgboost import XGBClassifier
+except ImportError:
+    XGBClassifier = None
+
+try:
+    from lightgbm import LGBMClassifier
+except ImportError:
+    LGBMClassifier = None
+
+from .strategy_base import Strategy
+
+class MLStrategy(Strategy):
+    def __init__(self, model="lgbm", random_state=42, calibrate=True, **kwargs):
+        self.model_name = model
+        self.random_state = random_state
+        self.calibrate = calibrate
+
+        if model == "rf":
+            base = RandomForestClassifier(
+                n_estimators=kwargs.get("n_estimators", 200),
+                max_depth=kwargs.get("max_depth", None),
+                min_samples_leaf=kwargs.get("min_samples_leaf", 3),
+                n_jobs=-1,
+                random_state=random_state,
+            )
+            self.supports_online = False
+            self._pipe = Pipeline([("clf", base)])
+        elif model == "xgb":
+            if XGBClassifier is None:
+                raise ImportError("xgboost is not installed")
+            base = XGBClassifier(
+                n_estimators=kwargs.get("n_estimators", 200),
+                max_depth=kwargs.get("max_depth", 5),
+                learning_rate=kwargs.get("learning_rate", 0.05),
+                subsample=kwargs.get("subsample", 0.8),
+                colsample_bytree=kwargs.get("colsample_bytree", 0.8),
+                random_state=random_state,
+                n_jobs=-1,
+                eval_metric="logloss",
+            )
+            self.supports_online = False
+            self._pipe = Pipeline([("clf", base)])
+        elif model == "lgbm":
+            if LGBMClassifier is None:
+                raise ImportError("lightgbm is not installed")
+            base = LGBMClassifier(
+                n_estimators=kwargs.get("n_estimators", 200),
+                max_depth=kwargs.get("max_depth", -1),
+                learning_rate=kwargs.get("learning_rate", 0.05),
+                subsample=kwargs.get("subsample", 0.8),
+                colsample_bytree=kwargs.get("colsample_bytree", 0.8),
+                min_child_samples=kwargs.get("min_child_samples", 5),
+                random_state=random_state,
+                n_jobs=-1,
+                verbose=-1,  # <-- add this line to suppress LightGBM warnings
+            )
+            self.supports_online = False
+            self._pipe = Pipeline([("clf", base)])
+        elif model == "logreg":
+            # Online-friendly linear model
+            sgd = SGDClassifier(loss="log_loss", learning_rate="optimal", max_iter=1, tol=None, warm_start=True,
+                                random_state=random_state)
+            self.supports_online = True
+            self._pipe = Pipeline([("scaler", StandardScaler(with_mean=False)), ("clf", sgd)])
+        else:
+            raise ValueError(f"Unknown model '{model}'")
+
+        self._calibrator = None
+
+    def _sanitize(self, X: pd.DataFrame) -> pd.DataFrame:
+        return X.replace([np.inf, -np.inf], np.nan).ffill().bfill().dropna()
+
+    def fit(self, X: pd.DataFrame, y: pd.Series):
+        Xc = self._sanitize(X)
+        yc = y.loc[Xc.index]
+        if len(Xc) == 0 or len(yc) == 0:
+            raise ValueError("Empty dataset after sanitization. Cannot fit ML model.")
+
+        tscv = TimeSeriesSplit(n_splits=min(5, max(2, len(Xc)//300)))
+        scores = []
+        for tr, va in tscv.split(Xc):
+            self._pipe.fit(Xc.iloc[tr], yc.iloc[tr])
+            p = self._proba_raw(Xc.iloc[va])
+            scores.append(roc_auc_score(yc.iloc[va], p))
+
+        self._pipe.fit(Xc, yc)
+        self.cv_auc_ = float(np.mean(scores)) if scores else None
+
+        if self.calibrate:
+            self._calibrator = CalibratedClassifierCV(self._pipe.named_steps["clf"], cv="prefit", method="isotonic")
+            self._calibrator.fit(Xc, yc)
+        return self
+
+    def _proba_raw(self, X: pd.DataFrame) -> np.ndarray:
+        if hasattr(self._pipe, "predict_proba") and hasattr(self._pipe.named_steps["clf"], "predict_proba"):
+            return self._pipe.predict_proba(X)[:, 1]
+        if hasattr(self._pipe.named_steps["clf"], "decision_function"):
+            from sklearn.metrics import log_loss
+            # Convert margin to probability via logistic link (approx)
+            dec = self._pipe.named_steps["clf"].decision_function(X)
+            return 1 / (1 + np.exp(-dec))
+        return self._pipe.predict_proba(X)[:, 1]
+
+    def online_update(self, X_new: pd.DataFrame, y_new: pd.Series, X_hist: pd.DataFrame = None, y_hist: pd.Series = None):
+        Xn = self._sanitize(X_new)
+        yn = y_new.loc[Xn.index]
+        if len(Xn) == 0:
+            logger.warning("Online update skipped: empty new data")
+            return
+        if self.supports_online:
+            self._pipe.named_steps["clf"].partial_fit(Xn, yn, classes=[0,1])
+            logger.info(f"Online update performed: {len(Xn)} samples")
+            if self.calibrate:
+                # refresh calibration lightly using recent data
+                self._calibrator = CalibratedClassifierCV(self._pipe.named_steps["clf"], cv=3, method="isotonic")
+                self._calibrator.fit(Xn, yn)
+        else:
+            if X_hist is not None and y_hist is not None:
+                Xc = pd.concat([X_hist, Xn]).loc[~pd.concat([X_hist, Xn]).index.duplicated(keep='last')]
+                yc = pd.concat([y_hist, yn]).loc[Xc.index]
+            else:
+                Xc, yc = Xn, yn
+            self.fit(Xc, yc)
+            logger.info(f"Offline retrain performed: total samples={len(Xc)}")
+
+    def predict_proba(self, X: pd.DataFrame) -> pd.Series:
+        Xc = self._sanitize(X)
+        if len(Xc) == 0:
+            return pd.Series(0.5, index=X.index, name="p_up")
+        if self.calibrate and self._calibrator is not None:
+            p = self._calibrator.predict_proba(Xc)[:,1]
+        else:
+            p = self._proba_raw(Xc)
+        return pd.Series(p, index=Xc.index, name="p_up")
+
+
+### `src/strategy_base.py`
+
+from __future__ import annotations
+import pandas as pd
+
+class Strategy:
+    def fit(self, X: pd.DataFrame, y: pd.Series):
+        raise NotImplementedError
+
+    def predict_proba(self, X: pd.DataFrame) -> pd.Series:
+        raise NotImplementedError
+
+    def online_update(self, X_new: pd.DataFrame, y_new: pd.Series, X_hist=None, y_hist=None):
+        pass
+
+
+### `src/labels.py`
+
+import pandas as pd
+
+def binary_up_down(df: pd.DataFrame, horizon: int) -> pd.Series:
+    fwd = df["close"].pct_change(horizon).shift(-horizon)
+    return (fwd > 0).astype(int)
+
+
+### src/features.py — with recency weighting + symbol filtering
+
+import pandas as pd
+import numpy as np
+import ta
+from loguru import logger
+# from newsapi import NewsApiClient
+from datetime import datetime, timedelta
+from dateutil import parser  # pip install python-dateutil
+# import nltk
+# nltk.download("vader_lexicon")  # Only needs to run once
+# from nltk.sentiment import SentimentIntensityAnalyzer
+import time
+# from requests.exceptions import SSLError
+
+# Initialize clients
+# newsapi = NewsApiClient(api_key="396c29fd806f4c6aa1afe1af7e094de6")
+# sia = SentimentIntensityAnalyzer()
+
+DEF_FILL = {"method": "ffill"}
+
+class FeatureConfig:
+    def __init__(self, rsi_period=14, ema_fast=12, ema_slow=26, window_vol=20, roc_lags=(1,3,5,10), timeframe_minutes=5):
+        self.rsi_period = rsi_period
+        self.ema_fast = ema_fast
+        self.ema_slow = ema_slow
+        self.window_vol = window_vol
+        self.roc_lags = list(roc_lags)
+        self.timeframe_minutes = timeframe_minutes
+
+# # --- Step 1: Fetch news ---
+# def fetch_news(symbol: str, timeframe_minutes: int = 5, retries=3) -> list[dict]:
+#     """
+#     Fetch latest news articles for a Forex symbol.
+#     Returns a list of article dicts (title + publishedAt, etc.).
+#     """
+#     now = datetime.utcnow()
+#     from_time = (now - timedelta(minutes=timeframe_minutes)).replace(microsecond=0)
+#     to_time = now.replace(microsecond=0)
+
+#     for attempt in range(retries):
+#         try:
+#             all_articles = newsapi.get_everything(
+#                 q=symbol,
+#                 from_param=from_time.isoformat(),
+#                 to=to_time.isoformat(),
+#                 language='en',
+#                 sort_by='publishedAt',
+#                 page_size=20
+#             )
+#             return [a for a in all_articles['articles']]  # full dict for recency weighting
+#         except SSLError as e:
+#             print(f"[NewsAPI] SSL error, retrying {attempt+1}/{retries}...")
+#             time.sleep(2)
+#         except Exception as e:
+#             print(f"[NewsAPI] Error fetching news: {e}")
+#             return []
+#     return []
+
+# # --- Step 2: Compute recency-weighted sentiment ---
+# def compute_sentiment(headlines: list[dict], recency_half_life: float = None) -> float:
+#     """
+#     Convert list of headlines into a numeric sentiment score.
+#     Applies exponential decay weighting based on recency.
+#     recency_half_life in seconds (default fallback 5 min)
+#     """
+#     if not headlines:
+#         return 0.0
+
+#     if recency_half_life is None:
+#         recency_half_life = 300.0  # default fallback if not provided
+
+#     now = datetime.utcnow()
+#     scores = []
+#     weights = []
+
+#     for h in headlines:
+#         title = h["title"]
+#         pub_time = parser.isoparse(h["publishedAt"])  # string -> datetime
+#         delta_sec = (now - pub_time).total_seconds()
+#         weight = 0.5 ** (delta_sec / recency_half_life)
+#         score = sia.polarity_scores(title)["compound"]
+#         scores.append(score * weight)
+#         weights.append(weight)
+
+#     return sum(scores) / (sum(weights) + 1e-10)
+
+# --- Step 3: Build features with sentiment integration ---
+def build_features(df: pd.DataFrame, cfg: FeatureConfig, symbol: str = None, timeframe_minutes: int = 5) -> pd.DataFrame:
+
+    X = pd.DataFrame(index=df.index)
+    try:
+
+        # --- price/momentum features ---
+        X["rsi"] = ta.momentum.rsi(df["close"], window=cfg.rsi_period)
+        X["ema_fast"] = ta.trend.ema_indicator(df["close"], window=cfg.ema_fast)
+        X["ema_slow"] = ta.trend.ema_indicator(df["close"], window=cfg.ema_slow)
+        X["ema_diff"] = (X["ema_fast"] - X["ema_slow"]) / df["close"]
+
+        bb = ta.volatility.BollingerBands(df["close"], window=cfg.window_vol, window_dev=2)
+        X["bb_high"] = bb.bollinger_hband()
+        X["bb_low"] = bb.bollinger_lband()
+        X["bb_width"] = (X["bb_high"] - X["bb_low"]) / df["close"]
+
+        macd = ta.trend.MACD(df["close"])
+        X["macd"] = macd.macd()
+        X["macd_signal"] = macd.macd_signal()
+        X["macd_diff"] = macd.macd_diff()
+
+        for l in cfg.roc_lags:
+            X[f"ret_{l}"] = df["close"].pct_change(l)
+
+        X["volatility_10"] = df["close"].pct_change().rolling(10).std()
+        X["volatility_20"] = df["close"].pct_change().rolling(20).std()
+
+        if "volume" in df.columns:
+            X["vol_ma_20"] = df["volume"].rolling(20).mean()
+            X["vol_ratio"] = df["volume"] / (X["vol_ma_20"] + 1e-10)
+
+        X["momentum_5"] = df["close"] - df["close"].shift(5)
+        X["momentum_10"] = df["close"] - df["close"].shift(10)
+        X["atr_14"] = ta.volatility.AverageTrueRange(df['high'], df['low'], df['close'], window=14).average_true_range()
+
+        X["fractal_up"] = ((df["high"].shift(2) < df["high"].shift(1)) &
+                            (df["high"].shift(1) > df["high"]) &
+                            (df["high"].shift(1) > df["high"].shift(-1)) &
+                            (df["high"].shift(1) > df["high"].shift(-2))).astype(int)
+        X["fractal_down"] = ((df["low"].shift(2) > df["low"].shift(1)) &
+                            (df["low"].shift(1) < df["low"]) &
+                            (df["low"].shift(1) < df["low"].shift(-1)) &
+                            (df["low"].shift(1) < df["low"].shift(-2))).astype(int)
+
+        # # --- news/sentiment caching per symbol ---
+        # cache = getattr(build_features, "_news_cache", {})
+        # tf_map = {"M1": 1, "M5": 5, "M15": 15, "M30": 30, "H1": 60, "H4": 240, "D1": 1440}
+        # timeframe_minutes = tf_map.get(cfg.timeframe, 5)  # fallback 5 min
+        # news_cache_interval = timeframe_minutes * 60
+
+        # if symbol in cache and (datetime.utcnow() - cache[symbol]["time"]).total_seconds() < news_cache_interval:
+        #     headlines = cache[symbol]["headlines"]
+        # else:
+        #     try:
+        #         headlines = fetch_news(symbol, timeframe_minutes=5)
+        #     except Exception as e:
+        #         print(f"Error fetching news for {symbol}: {e}")
+        #         headlines = []
+        #     cache[symbol] = {"headlines": headlines, "time": datetime.utcnow()}
+        # setattr(build_features, "_news_cache", cache)
+
+        # # --- filter for exact symbol match ---
+        # headlines = [h for h in headlines if symbol in h["title"]]
+
+        # --- compute weighted sentiment ---
+        X["sentiment_score"] = 0.0
+        # X["sentiment_score"] = compute_sentiment(headlines, recency_half_life=timeframe_minutes * 60)
+
+        X["ret_skew_10"] = df["close"].pct_change().rolling(10).skew()
+        X["ret_kurt_10"] = df["close"].pct_change().rolling(10).kurt()
+
+        X["hour_sin"] = np.sin(2 * np.pi * df.index.hour / 24)
+        X["hour_cos"] = np.cos(2 * np.pi * df.index.hour / 24)
+        X["dow_sin"] = np.sin(2 * np.pi * df.index.dayofweek / 7)
+        X["dow_cos"] = np.cos(2 * np.pi * df.index.dayofweek / 7)
+
+        # --- handle NaNs and infs ---
+        nan_count = X.isna().sum().sum()
+        inf_count = np.isinf(X.values).sum()
+        X = X.replace([np.inf, -np.inf], np.nan).ffill().bfill()
+        logger.debug(f"[{symbol}] Features built. Shape={X.shape}, NaNs filled={nan_count}, Infs replaced={inf_count}")
+    
+    except Exception as e:
+        logger.exception(f"[{symbol}] Error building features: {e}")
+        raise
+
+    return X
+
+def make_labels(df: pd.DataFrame, horizon: int) -> pd.Series:
+    fwd = df["close"].pct_change(horizon).shift(-horizon)
+    y = (fwd > 0).astype(int)
+    return y.loc[df.index]
+
+
+### `src/data.py`
+
+from __future__ import annotations
+import pandas as pd
+import numpy as np
+import MetaTrader5 as mt5
+from loguru import logger
+
+TF_MAP = {
+    "M1": mt5.TIMEFRAME_M1,
+    "M5": mt5.TIMEFRAME_M5,
+    "M15": mt5.TIMEFRAME_M15,
+    "M30": mt5.TIMEFRAME_M30,
+    "H1": mt5.TIMEFRAME_H1,
+    "H4": mt5.TIMEFRAME_H4,
+}
+
+def fetch_bars(symbol: str, timeframe: str, count: int) -> pd.DataFrame:
+    tf = TF_MAP[timeframe]
+    try:
+        rates = mt5.copy_rates_from_pos(symbol, tf, 0, count)
+        if rates is None or len(rates) == 0:
+            logger.warning(f"[{symbol}] No bars fetched for {timeframe}")
+            raise RuntimeError(f"No rates for {symbol} {timeframe}")
+        df = pd.DataFrame(rates)
+        df["time"] = pd.to_datetime(df["time"], unit="s", utc=True)
+        df = df.set_index("time").sort_index()
+        logger.debug(f"[{symbol}] Fetched {len(df)} bars for timeframe {timeframe}")
+        return df[["open","high","low","close","tick_volume"]].rename(columns={"tick_volume":"volume"})
+    except Exception as e:
+        logger.exception(f"[{symbol}] Error fetching bars: {e}")
+        raise
+
+def merge_features_labels(df: pd.DataFrame, X: pd.DataFrame, y: pd.Series) -> pd.DataFrame:
+    try:
+        out = X.copy()
+        out["y"] = y
+        out["close"] = df["close"]
+        out["high"] = df["high"]
+        out["low"] = df["low"]
+        out["volume"] = df.get("volume")
+        out = out.dropna()
+        logger.debug(f"Merged features & labels. Final shape: {out.shape}")
+        return out
+    except Exception as e:
+        logger.exception("Error merging features and labels")
+        raise
+
+
+### `src/mt5_client.py`
+
+from __future__ import annotations
+import os
+from typing import Optional
+import MetaTrader5 as mt5
+from loguru import logger
+
+class MT5Client:
+    def __init__(self, login: int, password: str, server: str, path: Optional[str] = None):
+        self.login = int(login)
+        self.password = password
+        self.server = server
+        self.path = path
+
+    def connect(self) -> bool:
+        if not mt5.initialize(path=self.path or None):
+            logger.error(f"MT5 initialize() failed: {mt5.last_error()}")
+            return False
+        authorized = mt5.login(self.login, password=self.password, server=self.server)
+        if not authorized:
+            logger.error(f"MT5 login failed: {mt5.last_error()}")
+        else:
+            logger.info("MT5 login OK")
+        return authorized
+
+    def shutdown(self):
+        mt5.shutdown()
+
+
+# src/config.py
+from __future__ import annotations
+import yaml
+from dataclasses import dataclass, field
+from typing import List, Dict, Any
+
+@dataclass
+class FeatureCfg:
+    rsi_period: int = 14
+    ema_fast: int = 12
+    ema_slow: int = 26
+    window_vol: int = 20
+    roc_lags: List[int] = field(default_factory=lambda: [1,3,5,10])
+
+@dataclass
+class RiskCfg:
+    risk_per_trade: float = 0.005
+    max_positions: int = 3
+    atr_multiplier_sl: float = 1.5
+    atr_multiplier_tp: float = 2.5
+    trailing_atr_mult: float = 1.0
+    min_prob_long: float = 0.55
+    min_prob_short: float = 0.55
+    block_on_drawdown: float = 0.10
+    session_filter: Dict[str, str] | None = None
+
+@dataclass
+class Cfg:
+    symbols: List[str] = field(default_factory=list)
+    timeframe: str = "M5"
+    history_bars: int = 2000
+    retrain_every_bars: int = 250
+    prediction_horizon: int = 6
+    features: FeatureCfg = field(default_factory=FeatureCfg)
+    models: List[Dict[str, Any]] = field(default_factory=list)
+    ensemble: Dict[str, Any] = field(default_factory=dict)
+    risk: RiskCfg = field(default_factory=RiskCfg)
+    logging: Dict[str, Any] = field(default_factory=dict)
+
+    @staticmethod
+    def from_yaml(path: str) -> "Cfg":
+        with open(path, "r") as f:
+            raw = yaml.safe_load(f)
+        return Cfg(
+            symbols=raw.get("symbols", ["EURUSD"]),
+            timeframe=raw.get("timeframe", "M5"),
+            history_bars=raw.get("history_bars", 2000),
+            retrain_every_bars=raw.get("retrain_every_bars", 250),
+            prediction_horizon=raw.get("prediction_horizon", 6),
+            features=FeatureCfg(**raw.get("features", {})),
+            models=raw.get("models", []),
+            ensemble=raw.get("ensemble", {}),
+            risk=RiskCfg(**raw.get("risk", {})),
+            logging=raw.get("logging", {}),
+        )
+
+
+
+---sending other codes.. please wait...---
+
+---all codes sent...---

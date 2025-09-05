@@ -1,0 +1,72 @@
+# --- Symbols & timeframe ---
+symbols: ["EURUSD#"]
+timeframe: "M5"            # One of: M1, M5, M15, M30, H1, H4
+history_bars: 2000          # How many bars to pull when (re)starting
+retrain_every_bars: 250     # Incremental retrain every N bars
+prediction_horizon: 6       # Bars ahead for label (~30 min on M5)
+
+# --- Features (fixed) ---
+features:
+  rsi_period: 14
+  ema_fast: 12
+  ema_slow: 26
+  window_vol: 20
+  roc_lags: [1, 3, 5, 10]
+
+# --- Base learners / models ---
+# For live bot: after tuning, Optuna best parameters overwrite these
+# For tuning: these ranges are used by Optuna
+models:
+  - name: lgbm
+    params: 
+      # Tunable ranges for Optuna
+      n_estimators: [100, 500]       # min, max
+      learning_rate: [0.01, 0.1, "log"]
+      max_depth: [3, 10]
+      subsample: [0.6, 1.0]
+      colsample_bytree: [0.6, 1.0]
+
+  - name: xgb
+    params:
+      n_estimators: [100, 500]
+      learning_rate: [0.01, 0.1, "log"]
+      max_depth: [3, 10]
+      subsample: [0.6, 1.0]
+      colsample_bytree: [0.6, 1.0]
+
+  - name: rf
+    params:
+      n_estimators: [100, 500]
+      max_depth: [3, 12]
+      min_samples_leaf: [1, 5]
+
+  - name: logreg
+    params: {}  # default logistic regression
+
+# --- Ensemble settings ---
+ensemble:
+  method: stacking           # soft_vote, stacking, or risk_weighted
+  weights: {lgbm: 0.35, xgb: 0.35, rf: 0.2, logreg: 0.1}
+  meta: {type: "logit", C: 1.0}
+
+# --- Risk management ---
+risk:
+  risk_per_trade: 0.005     # 0.5% of equity
+  max_positions: 3
+  atr_multiplier_sl: 1.5
+  atr_multiplier_tp: 2.5
+  trailing_atr_mult: 1.0
+  min_prob_long: 0.55
+  min_prob_short: 0.55
+  block_on_drawdown: 0.1    # pause if 10% drawdown from peak
+  transaction_cost_pips: 1.5 # Simulated cost for spread/commission
+  session_filter:
+    start: "07:00"
+    end: "22:00"
+
+# --- Logging ---
+logging:
+  level: INFO
+  to_file: true
+  rotate: 10 MB
+  retention: 7 days
