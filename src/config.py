@@ -22,6 +22,7 @@ class RiskCfg:
     min_prob_long: float = 0.55
     min_prob_short: float = 0.55
     block_on_drawdown: float = 0.10
+    transaction_cost_pips: float = 1.5
     session_filter: Dict[str, str] | None = None
 
 @dataclass

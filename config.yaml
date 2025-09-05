@@ -59,7 +59,7 @@ risk:
   min_prob_long: 0.55
   min_prob_short: 0.55
   block_on_drawdown: 0.1    # pause if 10% drawdown from peak
-  transaction_cost_pips: 1.5 # Simulated cost for spread/commission
+  # transaction_cost_pips: 1.5 # Simulated cost for spread/commission
   session_filter:
     start: "07:00"
     end: "22:00"
