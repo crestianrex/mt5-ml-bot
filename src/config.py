@@ -38,6 +38,16 @@ class Cfg:
     risk: RiskCfg = field(default_factory=RiskCfg)
     logging: Dict[str, Any] = field(default_factory=dict)
 
+    def timeframe_seconds(self) -> int | None:
+        """Converts timeframe string like 'M5' to seconds."""
+        unit = self.timeframe[0].upper()
+        value = int(self.timeframe[1:])
+        if unit == 'M':
+            return value * 60
+        elif unit == 'H':
+            return value * 3600
+        return None
+
     @staticmethod
     def from_yaml(path: str) -> "Cfg":
         with open(path, "r") as f:

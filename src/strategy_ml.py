@@ -1,4 +1,4 @@
-### `src/strategy_ml.py` (extended to keep your API and add calibration)
+### `src/strategy_ml.py` 
 
 from __future__ import annotations
 import pandas as pd

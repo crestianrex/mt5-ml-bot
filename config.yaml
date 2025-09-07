@@ -1,5 +1,5 @@
 # --- Symbols & timeframe ---
-symbols: ["EURUSD#"]
+symbols: ["EURUSD#", "USDJPY#", "AUDUSD#"]
 timeframe: "M5"            # One of: M1, M5, M15, M30, H1, H4
 history_bars: 2000          # How many bars to pull when (re)starting
 retrain_every_bars: 250     # Incremental retrain every N bars
@@ -59,7 +59,7 @@ risk:
   min_prob_long: 0.55
   min_prob_short: 0.55
   block_on_drawdown: 0.1    # pause if 10% drawdown from peak
-  # transaction_cost_pips: 1.5 # Simulated cost for spread/commission
+  transaction_cost_pips: 1.5 # Simulated cost for spread/commission
   session_filter:
     start: "07:00"
     end: "22:00"

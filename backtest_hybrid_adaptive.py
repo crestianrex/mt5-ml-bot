@@ -6,6 +6,10 @@ from loguru import logger
 from src.config import Cfg
 from src.risk import RiskManager
 from src.utils import get_training_data, load_ensemble, save_ensemble, setup_logging
+import MetaTrader5 as mt5
+
+if not mt5.initialize():
+    print("initialize() failed")
 
 # --- Initial Setup ---
 setup_logging()
