@@ -1,7 +1,8 @@
 # --- Symbols & timeframe ---
-symbols: ["EURUSD#", "USDJPY#", "AUDUSD#"]
+# symbols: ["EURGBP#", "EURJPY#", "EURUSD#", "GBPUSD#", "USDCAD#", "USDCHF#", "USDJPY#", "AUDUSD#"]
+symbols: ["EURGBP#", "EURJPY#"]
 timeframe: "M5"            # One of: M1, M5, M15, M30, H1, H4
-history_bars: 2000          # How many bars to pull when (re)starting
+history_bars: 500          # How many bars to pull when (re)starting # for optuna * 1 year of data: Approximately 69,120 bars.
 retrain_every_bars: 250     # Incremental retrain every N bars
 prediction_horizon: 6       # Bars ahead for label (~30 min on M5)
 
@@ -51,10 +52,11 @@ ensemble:
 
 # --- Risk management ---
 risk:
-  risk_per_trade: 0.005     # 0.5% of equity
+  risk_per_trade: 0.005      #0.01=1%  # 0.005 = 0.5% of equity
   max_positions: 3
   atr_multiplier_sl: 1.5
   atr_multiplier_tp: 2.5
+  breakeven_at_1R: true     # for backtest only | live trading always true by default
   trailing_atr_mult: 1.0
   min_prob_long: 0.55
   min_prob_short: 0.55
@@ -63,6 +65,7 @@ risk:
   session_filter:
     start: "07:00"
     end: "22:00"
+  min_ensemble_auc: 0.55 # NEW: Minimum ensemble AUC to allow trading
 
 # --- Logging ---
 logging:

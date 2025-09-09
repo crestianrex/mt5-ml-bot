@@ -6,7 +6,6 @@ from loguru import logger
 import pandas as pd
 
 from src.config import Cfg, FeatureCfg
-from src.data import fetch_bars, merge_features_labels
 from src.features import build_features
 from src.labels import binary_up_down
 from src.ensemble import Ensemble
@@ -43,9 +42,18 @@ def load_optuna_params(symbol: str) -> dict | None:
     logger.info(f"[{symbol}] Loaded Optuna best params from {file_path}")
     return model_params
 
-def get_training_data(cfg: Cfg, symbol: str) -> tuple[pd.DataFrame, pd.Series, pd.DataFrame]:
+def get_training_data(cfg: Cfg, symbol: str, source: str = "mt5") -> tuple[pd.DataFrame, pd.Series, pd.DataFrame]:
     """Fetches historical data and builds features and labels."""
-    logger.info(f"[{symbol}] Fetching {cfg.history_bars} bars for timeframe {cfg.timeframe}...")
+    
+    if source == "mt5":
+        from src.data import fetch_bars, merge_features_labels
+        logger.info(f"[{symbol}] Fetching {cfg.history_bars} bars for timeframe {cfg.timeframe} from MT5...")
+    elif source == "csv":
+        from src.data_colab import fetch_bars, merge_features_labels
+        logger.info(f"[{symbol}] Fetching {cfg.history_bars} bars for timeframe {cfg.timeframe} from CSV...")
+    else:
+        raise ValueError(f"Unknown data source: {source}")
+
     df = fetch_bars(symbol, cfg.timeframe, cfg.history_bars)
     if df.empty:
         return pd.DataFrame(), pd.Series(), pd.DataFrame()

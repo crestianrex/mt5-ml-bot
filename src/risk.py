@@ -2,7 +2,6 @@
 from __future__ import annotations
 import pandas as pd
 import numpy as np
-import MetaTrader5 as mt5
 from loguru import logger
 from .config import RiskCfg
 
@@ -52,6 +51,7 @@ class RiskManager:
         return allowed
 
     def manage_open_positions(self, symbol: str, atr: float):
+        import MetaTrader5 as mt5
         """
         Adjust stop loss for open positions:
         - Move SL to breakeven at 1R

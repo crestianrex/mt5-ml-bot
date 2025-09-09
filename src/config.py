@@ -18,12 +18,14 @@ class RiskCfg:
     max_positions: int = 3
     atr_multiplier_sl: float = 1.5
     atr_multiplier_tp: float = 2.5
+    breakeven_at_1R: bool = True  # New setting
     trailing_atr_mult: float = 1.0
     min_prob_long: float = 0.55
     min_prob_short: float = 0.55
     block_on_drawdown: float = 0.10
     transaction_cost_pips: float = 1.5
     session_filter: Dict[str, str] | None = None
+    min_ensemble_auc: float = 0.50 # Minimum ensemble AUC to allow trading
 
 @dataclass
 class Cfg:
