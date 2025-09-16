@@ -8,6 +8,7 @@ from loguru import logger
 import yaml
 from functools import partial
 from joblib import Parallel, delayed
+import traceback # Added for detailed error logging
 
 from src.config import Cfg
 from src.data_colab import fetch_bars, merge_features_labels
@@ -108,8 +109,11 @@ def objective(trial, df: pd.DataFrame, y: pd.Series, static_features: pd.DataFra
         mean_auc = float(pd.Series(aucs).mean())
         return 1 - mean_auc
 
+    except optuna.exceptions.TrialPruned as e:
+        raise e # Allow Optuna to handle pruning
     except Exception as e:
-        logger.error(f"Trial failed with error: {e}")
+        tb_str = traceback.format_exc()
+        logger.error(f"--- Trial Failed ---\nError: {e}\nTraceback:\n{tb_str}")
         return float('inf')
 
 def run_tuning_for_symbol(sym: str):
