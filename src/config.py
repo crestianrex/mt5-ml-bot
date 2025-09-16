@@ -54,6 +54,8 @@ class Cfg:
     history_bars: int = 2000
     retrain_every_bars: int = 250
     prediction_horizon: int = 6
+    use_gpu: bool = False
+    cv_samples_per_split: int = 300
     features: FeatureCfg = field(default_factory=FeatureCfg)
     models: List[Dict[str, Any]] = field(default_factory=list)
     ensemble: Dict[str, Any] = field(default_factory=dict)
@@ -90,6 +92,8 @@ class Cfg:
             history_bars=raw.get("history_bars", 2000),
             retrain_every_bars=raw.get("retrain_every_bars", 250),
             prediction_horizon=raw.get("prediction_horizon", 6),
+            use_gpu=raw.get("use_gpu", False),
+            cv_samples_per_split=raw.get("cv_samples_per_split", 300),
             features=FeatureCfg(**cleaned_feature_params),
             models=raw.get("models", []),
             ensemble=raw.get("ensemble", {}),

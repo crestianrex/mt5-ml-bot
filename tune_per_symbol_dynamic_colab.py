@@ -17,14 +17,15 @@ from src.ensemble import Ensemble
 from sklearn.model_selection import TimeSeriesSplit
 from sklearn.metrics import roc_auc_score
 
-# --- Detect Colab and Mount Drive ---
-IN_COLAB = 'google.colab' in str(get_ipython())
-if IN_COLAB:
-    from google.colab import drive
-    drive.mount('/content/drive')
-    # Update this path to your desired location in Google Drive
+# --- Detect Colab and set path ---
+# Assumes drive is already mounted if running in Colab.
+try:
+    import google.colab
+    # This path should point to the location in your Google Drive where params are stored.
     PARAMS_DIR = "/content/drive/MyDrive/mt5_ml_bot_params/optuna_params"
-else:
+    IN_COLAB = True
+except ImportError:
+    IN_COLAB = False
     PARAMS_DIR = "optuna_params"
 
 os.makedirs(PARAMS_DIR, exist_ok=True)

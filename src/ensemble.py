@@ -116,8 +116,8 @@ class Ensemble:
     def __init__(self, cfg, model_params: dict | None = None):
         self.cfg = cfg
         self.members: Dict[str, MLStrategy] = {}
-        use_gpu = cfg.get("use_gpu", False)
-        cv_samples_per_split = cfg.get("cv_samples_per_split", 300)
+        use_gpu = cfg.use_gpu
+        cv_samples_per_split = cfg.cv_samples_per_split
 
         for m in cfg.models:
             name = m["name"]
@@ -143,13 +143,7 @@ class Ensemble:
         self.threshold_grid = cfg.ensemble.get("threshold_grid", "auto")
 
         # Trading cost parameters from config.yaml
-        self.trading_costs = cfg.get("trading_costs", {
-            "spread_pips": 2.0,
-            "slippage_pips": 0.5,
-            "commission_per_trade": 0.0,
-            "lot_size": 1.0,
-            "pip_value": 0.0001,
-        })
+        self.trading_costs = cfg.trading_costs.get("defaults") if hasattr(cfg, 'trading_costs') else {}
 
         # Internal trackers
         self._stacker = None
