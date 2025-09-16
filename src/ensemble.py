@@ -158,7 +158,7 @@ class Ensemble:
         logger.info("Fitting ensemble members with time-series CV...")
         self.member_cv_aucs_ = {}
 
-        cv_samples_per_split = self.cfg.get("cv_samples_per_split", 300)
+        cv_samples_per_split = self.cfg.cv_samples_per_split
         n_splits = min(5, max(2, len(X) // cv_samples_per_split))
         tscv = TimeSeriesSplit(n_splits=n_splits)
         
