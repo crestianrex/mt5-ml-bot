@@ -11,21 +11,41 @@ class FeatureCfg:
     ema_slow: int = 26
     window_vol: int = 20
     roc_lags: List[int] = field(default_factory=lambda: [1,3,5,10])
+    adx_period: int = 14
+    rsi_ob_level: int = 70
+    rsi_os_level: int = 30
+    adx_trend_thresh: int = 25
+    timeframe_minutes: int = 5
 
 @dataclass
 class RiskCfg:
     risk_per_trade: float = 0.005
     max_positions: int = 3
+    max_portfolio_risk: float = 0.03
     atr_multiplier_sl: float = 1.5
     atr_multiplier_tp: float = 2.5
-    breakeven_at_1R: bool = True  # New setting
+    breakeven_at_1R: bool = True
     trailing_atr_mult: float = 1.0
     min_prob_long: float = 0.55
     min_prob_short: float = 0.55
     block_on_drawdown: float = 0.10
     transaction_cost_pips: float = 1.5
     session_filter: Dict[str, str] | None = None
-    min_ensemble_auc: float = 0.50 # Minimum ensemble AUC to allow trading
+    min_ensemble_auc: float = 0.70
+    dynamic_risk: Dict[str, Any] | None = field(default_factory=lambda: {
+        "enabled": True,
+        "base_risk": 0.005,
+        "max_risk": 0.01,
+        "auc_floor": 0.70,
+        "auc_ceiling": 0.85
+    })
+    dynamic_tp: Dict[str, Any] | None = field(default_factory=lambda: {
+        "enabled": True,
+        "base_tp_mult": 2.0,
+        "max_tp_mult": 3.5,
+        "auc_floor": 0.70,
+        "auc_ceiling": 0.85
+    })
 
 @dataclass
 class Cfg:
@@ -54,15 +74,25 @@ class Cfg:
     def from_yaml(path: str) -> "Cfg":
         with open(path, "r") as f:
             raw = yaml.safe_load(f)
+        
+        # Handle feature params that might be lists for tuning
+        feature_params = raw.get("features", {})
+        cleaned_feature_params = {}
+        for k, v in feature_params.items():
+            if isinstance(v, list) and k != 'roc_lags':
+                cleaned_feature_params[k] = v[0] # Use first value as default for backtesting
+            else:
+                cleaned_feature_params[k] = v
+
         return Cfg(
             symbols=raw.get("symbols", ["EURUSD"]),
             timeframe=raw.get("timeframe", "M5"),
             history_bars=raw.get("history_bars", 2000),
             retrain_every_bars=raw.get("retrain_every_bars", 250),
             prediction_horizon=raw.get("prediction_horizon", 6),
-            features=FeatureCfg(**raw.get("features", {})),
+            features=FeatureCfg(**cleaned_feature_params),
             models=raw.get("models", []),
             ensemble=raw.get("ensemble", {}),
             risk=RiskCfg(**raw.get("risk", {})),
-            logging=raw.get("logging", {}),
+            logging=raw.get("logging", {})
         )

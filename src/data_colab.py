@@ -1,3 +1,4 @@
+# /home/kyani/Desktop/new/mt5-ml-bot/src/data_colab.py
 from __future__ import annotations
 import pandas as pd
 import os
@@ -30,7 +31,8 @@ def fetch_bars(symbol: str, timeframe: str, count: int) -> pd.DataFrame:
             logger.error(f"CSV file not found: {file_path}. Please ensure data is pre-fetched and available.")
             raise FileNotFoundError(f"Historical data CSV not found for {symbol} {timeframe}")
 
-        df = pd.read_csv(file_path, index_col="time", parse_dates=True)
+        df = pd.read_csv(file_path, index_col="time")
+        df.index = pd.to_datetime(df.index, format='%Y-%m-%d %H:%M:%S%z') # Explicitly convert index to datetime with format
         
         # Ensure the DataFrame has the expected columns and order
         expected_cols = ["open", "high", "low", "close", "volume"]

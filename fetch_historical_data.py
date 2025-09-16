@@ -1,14 +1,17 @@
 import MetaTrader5 as mt5
 import pandas as pd
 import os
-import yaml
+# import yaml # Removed
 from loguru import logger
+from dotenv import load_dotenv # Added
+from src.config import Cfg # Added
+from src.utils import setup_logging # Added
 
-# Configure Loguru for file logging
-LOG_FILE = "logs/fetch_historical_data.log"
-logger.remove() # Remove default handler
-logger.add(os.sys.stderr, level="INFO") # Add back console output
-logger.add(LOG_FILE, rotation="10 MB", retention="7 days", level="INFO") # Add file output
+# Configure Loguru for file logging # Removed
+# LOG_FILE = "logs/fetch_historical_data.log" # Removed
+# logger.remove() # Remove default handler # Removed
+# logger.add(os.sys.stderr, level="INFO") # Add back console output # Removed
+# logger.add(LOG_FILE, rotation="10 MB", retention="7 days", level="INFO") # Add file output # Removed
 
 # --- MT5 Timeframe Mapping ---
 TF_MAP = {
@@ -46,8 +49,12 @@ def fetch_and_save_bars(symbol: str, timeframe: str, count: int, save_dir: str):
         logger.error(f"[{symbol}] Error fetching or saving bars: {e}")
 
 if __name__ == "__main__":
-    # Ensure logs directory exists
-    os.makedirs("logs", exist_ok=True)
+    # --- Initial Setup --- # Added
+    load_dotenv() # Added
+    setup_logging() # Added
+
+    # Ensure logs directory exists # Removed (setup_logging handles this)
+    # os.makedirs("logs", exist_ok=True) # Removed
 
     # Initialize MT5
     if not mt5.initialize():
@@ -58,18 +65,19 @@ if __name__ == "__main__":
     logger.info("MetaTrader5 initialized successfully.")
 
     # Load config from config.yaml
-    config_path = "config.yaml" # Assuming this script is run from the project root
-    try:
-        with open(config_path, "r") as f:
-            cfg = yaml.safe_load(f)
-    except FileNotFoundError:
-        logger.error(f"config.yaml not found at {config_path}. Please run this script from the project root.")
-        mt5.shutdown()
-        exit()
+    # config_path = "config.yaml" # Assuming this script is run from the project root # Removed
+    # try: # Removed
+    #     with open(config_path, "r") as f: # Removed
+    #         cfg = yaml.safe_load(f) # Removed
+    # except FileNotFoundError: # Removed
+    #     logger.error(f"config.yaml not found at {config_path}. Please run this script from the project root.") # Removed
+    #     mt5.shutdown() # Removed
+    #     exit() # Removed
+    cfg = Cfg.from_yaml("config.yaml") # Added
 
-    symbols = cfg.get("symbols", [])
-    timeframe = cfg.get("timeframe", "M5")
-    history_bars = cfg.get("history_bars", 2000)
+    symbols = cfg.symbols # Changed from cfg.get("symbols", [])
+    timeframe = cfg.timeframe # Changed from cfg.get("timeframe", "M5")
+    history_bars = cfg.history_bars # Changed from cfg.get("history_bars", 2000)
     
     if not symbols:
         logger.warning("No symbols found in config.yaml. Exiting.")

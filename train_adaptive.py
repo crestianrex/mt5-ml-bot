@@ -1,16 +1,14 @@
-# train_adaptive.py
-import MetaTrader5 as mt5
+# /home/kyani/Desktop/new/mt5-ml-bot/train_adaptive.py
 from loguru import logger
+from dotenv import load_dotenv # Added
 
 from src.config import Cfg
 from src.ensemble import Ensemble
 from src.utils import get_training_data, load_optuna_params, save_ensemble, setup_logging
 
 # --- Initial Setup ---
+load_dotenv() # Added
 setup_logging()  # Set up logging early
-if not mt5.initialize():
-    logger.error("MT5 initialize() failed. Please check terminal installation.")
-    exit(1)
 
 # --- Main Training Execution ---
 def main():
@@ -44,4 +42,4 @@ def main():
 
 if __name__ == "__main__":
     main()
-    mt5.shutdown()
+    # mt5.shutdown()

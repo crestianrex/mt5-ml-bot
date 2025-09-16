@@ -1,2 +1,0 @@
-EURGBP_best_params.pkl 10000
-EURJPY_best_params.pkl 10000

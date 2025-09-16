@@ -1,4 +1,4 @@
-# backtest_hybrid_adaptive.py — adaptive hybrid backtesting with saved ensembles & incremental retraining
+# /home/kyani/Desktop/new/mt5-ml-bot/backtest_hybrid_adaptive.py — adaptive hybrid backtesting with saved ensembles & incremental retraining
 from __future__ import annotations
 import pandas as pd
 from loguru import logger
@@ -11,15 +11,18 @@ from src.utils import get_training_data, load_ensemble, save_ensemble, setup_log
 
 # --- Initial Setup ---
 setup_logging()
+cfg = Cfg.from_yaml("config.yaml") # Moved from __main__
+setup_logging(level=cfg.logging["level"], to_file=cfg.logging["to_file"], rotate=cfg.logging["rotate"], retention=cfg.logging["retention"])
 
 # NOTE: For backtesting, we assume a standard pip size. This is a simplification.
 # For a more precise backtest, this could be fetched per-symbol.
 PIP_SIZE_ASSUMPTION = 0.0001
 CONTRACT_SIZE = 100000
 
+
 class SimPosition:
     """Simulated position for backtesting."""
-    def __init__(self, symbol, direction, lots, entry_price, sl, tp, entry_time, atr):
+    def __init__(self, symbol, direction, lots, entry_price, sl, tp, entry_time, atr, entry_auc): # Added entry_auc
         self.symbol = symbol
         self.direction = direction
         self.lots = lots
@@ -32,6 +35,7 @@ class SimPosition:
         self.pnl = None
         self.atr = atr
         self.status = "open"
+        self.entry_auc = entry_auc # Added entry_auc
 
     def close(self, price, time, pnl):
         self.exit_price = price
@@ -42,6 +46,8 @@ class SimPosition:
 class HybridBacktester:
     """Adaptive hybrid backtester mirroring main_hybrid_adaptive.py logic."""
     def __init__(self, cfg: Cfg):
+        self.logged_low_confidence = set()
+        self.logged_skips = set()
         self.cfg = cfg
         self.equity = 1000.0
         self.positions: list[SimPosition] = []
@@ -123,6 +129,7 @@ class HybridBacktester:
 
     def run(self):
         logger.info("=== Starting Hybrid Adaptive Backtest ===")
+
         for sym in self.cfg.symbols:
             logger.info(f"--- Backtesting Symbol: {sym} ---")
             data, X, y = get_training_data(self.cfg, sym, source="csv")
@@ -152,36 +159,55 @@ class HybridBacktester:
                     logger.info(
                         f"[{sym}] Ensemble retraining at {bar_time} using last {len(train_data)} bars..."
                     )
-                    ens.fit(train_data.drop(columns=["y","close","high","low","volume"]), train_data["y"])
+                    # Optimization: Explicitly select feature columns to avoid unnecessary copying
+                    X_train_retrain = train_data[X.columns]
+                    y_train_retrain = train_data["y"]
+                    ens.fit(X_train_retrain, y_train_retrain)
+                    for name, auc in ens.member_cv_aucs_.items():
+                        logger.info(f"[{sym}]   {name} CV AUC: {auc:.4f}")
                     save_ensemble(ens, sym)
 
                 # Check ensemble confidence before trading
                 if ens.ensemble_cv_auc_ is not None and ens.ensemble_cv_auc_ < risk_mgr.cfg.min_ensemble_auc:
-                    logger.info(f"[{sym}] Trading blocked due to low ensemble confidence (AUC={ens.ensemble_cv_auc_:.4f} < {risk_mgr.cfg.min_ensemble_auc:.4f}).")
+                    if sym not in self.logged_low_confidence:
+                        logger.info(f"[{sym}] Trading blocked due to low ensemble confidence (AUC={ens.ensemble_cv_auc_:.4f} < {risk_mgr.cfg.min_ensemble_auc:.4f}).")
+                        # Add the symbol to the set to prevent future logging for this instance
+                        self.logged_low_confidence.add(sym)
                     self.equity_curve.append((bar_time, self.equity)) # Append current equity even if no trade
                     continue # Skip trade decision for this bar
+                else:
+                    # If confidence is no longer low, remove the symbol from the set
+                    if sym in self.logged_low_confidence:
+                        self.logged_low_confidence.remove(sym)
 
                 # Decide on new trades
                 prob_up = ens.predict_proba(last_features).iloc[0]
                 direction = "long" if prob_up >= risk_mgr.cfg.min_prob_long else "short" if (1 - prob_up) >= risk_mgr.cfg.min_prob_short else None
 
                 if direction:
-                    if any(p.symbol == sym and p.status == "open" for p in self.positions):
-                        logger.debug(f"[{sym}] Skipping new trade; existing position is open.")
+                    # Check if a position is already open and if the message hasn't been logged yet
+                    if any(p.symbol == sym and p.status == "open" for p in self.positions) and sym not in self.logged_skips:
+                        logger.info(f"[{sym}] Skipping new trade; existing position is open.")
+                        # Add the symbol to the set so the message won't be logged again
+                        self.logged_skips.add(sym)
                     else:
-                        lots = risk_mgr.position_size(self.equity, atr, 10.0, PIP_SIZE_ASSUMPTION)
+                        # If the position is closed, remove the symbol from the set to allow a new log message later
+                        if sym in self.logged_skips and not any(p.symbol == sym and p.status == "open" for p in self.positions):
+                            self.logged_skips.remove(sym)
+
+                        lots = risk_mgr.position_size(self.equity, atr, 10.0, PIP_SIZE_ASSUMPTION, ens.ensemble_cv_auc_)
                         if lots > 0:
                             price = current_row["close"]
-                            sl, tp = risk_mgr.stop_targets(price, atr, direction)
+                            sl, tp = risk_mgr.stop_targets(price, atr, direction, ens.ensemble_cv_auc_)
                             # Store the ATR at time of trade for breakeven calculations
-                            pos = SimPosition(sym, direction, lots, price, sl, tp, bar_time, atr)
+                            pos = SimPosition(sym, direction, lots, price, sl, tp, bar_time, atr, ens.ensemble_cv_auc_)
                             self.positions.append(pos)
                             logger.info(
                                 f"[{sym}] Opened {direction} position at {price:.5f}. "
-                                f"Lots: {lots:.2f}, SL: {sl:.5f}, TP: {tp:.5f}"
+                                f"Lots: {lots:.2f}, SL: {sl:.5f}, TP: {tp:.5f}, AUC: {ens.ensemble_cv_auc_:.4f}"
                             )
                 else:
-                    logger.debug(f"[{sym}] No trade signal. Probs: (Up: {prob_up:.3f}, Down: {1-prob_up:.3f})")
+                    logger.info(f"[{sym}] No trade signal. Probs: (Up: {prob_up:.3f}, Down: {1-prob_up:.3f})")
 
                 self.equity_curve.append((bar_time, self.equity))
             
@@ -217,7 +243,6 @@ class HybridBacktester:
         return trades_df, eq_df
 
 if __name__ == "__main__":
-    cfg = Cfg.from_yaml("config.yaml")
     bt = HybridBacktester(cfg)
     trades_df, eq_df = bt.run()
     print("\n--- Trades Summary ---")

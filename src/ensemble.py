@@ -1,4 +1,3 @@
-### src/ensemble.py
 from __future__ import annotations
 import pandas as pd
 import numpy as np
@@ -6,162 +5,271 @@ from typing import Dict
 from .strategy_ml import MLStrategy
 from sklearn.isotonic import IsotonicRegression
 from loguru import logger
-from sklearn.metrics import roc_auc_score
+from sklearn.metrics import roc_auc_score, f1_score, precision_score, recall_score
 from sklearn.model_selection import TimeSeriesSplit
+from collections import defaultdict
 
+# ==============================
+#   Forex-Aware PnL Function
+# ==============================
+def custom_pnl(y_true, y_pred, prices: pd.Series,
+               spread_pips=2.0, slippage_pips=0.5, commission_per_trade=0.0,
+               lot_size=1.0, pip_value=0.0001) -> float:
+    """
+    Simulate forex PnL given predictions, accounting for spread, commission, slippage.
+
+    y_true: true labels (unused, but kept for consistency with sklearn scorer API)
+    y_pred: binary predictions or probs (0/1 long-short signals)
+    prices: pd.Series of close prices
+    """
+    if len(prices) != len(y_pred):
+        raise ValueError("Prices and predictions length mismatch")
+
+    pnl = []
+    spread = spread_pips * pip_value
+    slippage = slippage_pips * pip_value
+
+    for i in range(1, len(prices)):
+        signal = 1 if y_pred[i] >= 0.5 else -1  # long/short
+        entry_price = prices.iloc[i - 1]
+        exit_price = prices.iloc[i]
+
+        # adjust for slippage
+        if signal == 1:  # long
+            entry_price += slippage
+            exit_price -= slippage
+        else:            # short
+            entry_price -= slippage
+            exit_price += slippage
+
+        # profit in pips
+        pip_diff = (exit_price - entry_price) / pip_value
+        ret = pip_diff * signal
+
+        # subtract spread and commission
+        ret -= spread_pips
+        ret -= commission_per_trade / (lot_size / 0.01)  # normalize commission
+
+        pnl.append(ret * lot_size)
+
+    return float(np.sum(pnl))
+
+
+# ==============================
+#   Dynamic Weighted Ensemble
+# ==============================
+class DynamicWeightedEnsemble:
+    def __init__(self, base_models, decay=0.9, min_weight=0.05):
+        """
+        base_models: dict {name: model}
+        decay: exponential decay factor for old scores
+        min_weight: floor weight to prevent total exclusion
+        """
+        self.base_models = base_models
+        self.decay = decay
+        self.min_weight = min_weight
+        self.model_scores = defaultdict(lambda: 0.5)  # init with neutral AUC
+        self.weights = {name: 1.0 / len(base_models) for name in base_models}
+
+    def update_weights(self, X_val, y_val):
+        """Update model weights based on latest validation performance."""
+        new_scores = {}
+        for name, model in self.base_models.items():
+            try:
+                preds = model.predict_proba(X_val)[:, 1]
+                auc = roc_auc_score(y_val, preds)
+            except Exception:
+                auc = 0.5  # fallback
+            self.model_scores[name] = (
+                self.decay * self.model_scores[name] + (1 - self.decay) * auc
+            )
+            new_scores[name] = self.model_scores[name]
+
+        # normalize weights
+        scores = np.array(list(new_scores.values()))
+        weights = scores / (scores.sum() + 1e-9)
+
+        # apply min_weight
+        weights = np.clip(weights, self.min_weight, None)
+        weights = weights / weights.sum()
+
+        self.weights = dict(zip(new_scores.keys(), weights))
+        return self.weights
+
+    def predict_proba(self, X):
+        """Weighted soft voting using dynamic weights."""
+        preds = np.zeros(len(X))
+        for name, model in self.base_models.items():
+            p = model.predict_proba(X)[:, 1]
+            preds += self.weights.get(name, 1.0 / len(self.base_models)) * p
+        return np.vstack([1 - preds, preds]).T
+
+    def predict(self, X, threshold=0.5):
+        proba = self.predict_proba(X)[:, 1]
+        return (proba >= threshold).astype(int)
+
+
+# ==============================
+#   Main Ensemble Class
+# ==============================
 class Ensemble:
     def __init__(self, cfg, model_params: dict | None = None):
-        """
-        cfg: configuration object
-        model_params: optional per-symbol Optuna-tuned params, dict like:
-            {
-                "lgbm": {...},
-                "xgb": {...},
-                "rf": {...},
-                "logreg": {...}
-            }
-        """
         self.cfg = cfg
         self.members: Dict[str, MLStrategy] = {}
+        use_gpu = cfg.get("use_gpu", False)
+        cv_samples_per_split = cfg.get("cv_samples_per_split", 300)
+
         for m in cfg.models:
             name = m["name"]
             params = m.get("params", {}).copy()
             if model_params and name in model_params:
                 params.update(model_params[name])
-            # Force calibrate=True inside MLStrategy for per-model isotonic
-            self.members[name] = MLStrategy(model=name, calibrate=True, **params)
 
+            # --- GPU Acceleration ---
+            if use_gpu and name in ["lgbm", "xgb"]:
+                params['device'] = 'gpu'
+
+            self.members[name] = MLStrategy(model=name, 
+                                          calibrate=True, 
+                                          cv_samples_per_split=cv_samples_per_split, 
+                                          **params)
+
+        # Ensemble configuration
         self.method = cfg.ensemble.get("method", "soft_vote")
         self.weights = cfg.ensemble.get("weights", {k: 1/len(self.members) for k in self.members})
         self.meta = cfg.ensemble.get("meta", {"type": "logit", "C": 1.0})
+        self.flat_mode = cfg.ensemble.get("flat_mode", False)
+        self.threshold_metric = cfg.ensemble.get("threshold_metric", "custom_pnl")
+        self.threshold_grid = cfg.ensemble.get("threshold_grid", "auto")
+
+        # Trading cost parameters from config.yaml
+        self.trading_costs = cfg.get("trading_costs", {
+            "spread_pips": 2.0,
+            "slippage_pips": 0.5,
+            "commission_per_trade": 0.0,
+            "lot_size": 1.0,
+            "pip_value": 0.0001,
+        })
+
+        # Internal trackers
         self._stacker = None
         self._meta_calibrator: IsotonicRegression | None = None
-        self.ensemble_cv_auc_ = 0.50 # Initialize ensemble AUC
+        self.ensemble_cv_auc_ = 0.50
+        self.member_cv_aucs_: Dict[str, float] = {}
 
-    def update_params(self, new_params: dict):
-        """
-        Update base learner parameters dynamically.
+        # Dynamic weighting engine
+        self.dynamic_ensemble = DynamicWeightedEnsemble(self.members)
 
-        new_params: dict like
-        {
-            "lgbm": {"n_estimators":400, "learning_rate":0.03, ...},
-            "xgb": {...},
-            "rf": {...},
-            "logreg": {}
-        }
-        """
-        if not new_params:
-            logger.warning("No new parameters provided to update.")
-            return
+    def fit(self, X: pd.DataFrame, y: pd.Series, prices: pd.Series | None = None):
+        logger.info("Fitting ensemble members with time-series CV...")
+        self.member_cv_aucs_ = {}
 
-        for name, params in new_params.items():
-            if name in self.members and params:
-                self.members[name].set_params(**params)
-                logger.info(f"[{name}] Parameters updated: {params}")
-                self.model_params[name] = params
-
-    def fit(self, X: pd.DataFrame, y: pd.Series):
-        logger.info("Fitting ensemble members with proper cross-validation...")
-        """
-        Fit all member models and the stacking meta-model using time-series cross-validation
-        to prevent data leakage.
-        """
-        tscv = TimeSeriesSplit(n_splits=min(5, max(2, len(X) // 300)))
+        cv_samples_per_split = self.cfg.get("cv_samples_per_split", 300)
+        n_splits = min(5, max(2, len(X) // cv_samples_per_split))
+        tscv = TimeSeriesSplit(n_splits=n_splits)
         
         out_of_fold_predictions = []
         out_of_fold_true_values = []
-        member_cv_aucs = {name: [] for name in self.members.keys()}
+        member_cv_aucs_raw = {name: [] for name in self.members.keys()}
         meta_aucs = []
 
         for fold, (tr_idx, val_idx) in enumerate(tscv.split(X)):
             X_tr, X_val = X.iloc[tr_idx], X.iloc[val_idx]
             y_tr, y_val = y.iloc[tr_idx], y.iloc[val_idx]
 
-            logger.debug(f"Fold {fold+1}/{tscv.n_splits}: Train size={len(X_tr)}, Val size={len(X_val)}")
-
-            # Fit base models on the training part of the fold
-            fold_base_model_preds = {}
+            # fit members
+            fold_base_preds = {}
             for name, model in self.members.items():
                 model.fit(X_tr, y_tr)
-                # Predict on the validation part of the fold
                 p_val = model.predict_proba(X_val)
-                fold_base_model_preds[name] = p_val
-                
-                # Store individual model AUC for this fold
+                fold_base_preds[name] = p_val
                 if hasattr(model, 'cv_auc_') and model.cv_auc_ is not None:
-                     member_cv_aucs[name].append(model.cv_auc_)
+                    member_cv_aucs_raw[name].append(model.cv_auc_)
 
-            # Create the meta-model's training data for this fold
-            P_val = pd.concat(fold_base_model_preds.values(), axis=1)
+            # stacking features
+            P_val = pd.concat(fold_base_preds.values(), axis=1)
             P_val.columns = self.members.keys()
 
-            # Store the out-of-fold predictions and true values
             out_of_fold_predictions.append(P_val)
             out_of_fold_true_values.append(y_val)
 
-        # --- After all folds, create the full out-of-fold dataset ---
+            # update dynamic weights
+            self.dynamic_ensemble.update_weights(X_val, y_val)
+
+        # aggregate OOF
         P_oof = pd.concat(out_of_fold_predictions)
         y_oof = pd.concat(out_of_fold_true_values)
 
-        # --- Fit the final meta-model on the clean out-of-fold predictions ---
+        # log average AUC per member
+        for name, aucs in member_cv_aucs_raw.items():
+            self.member_cv_aucs_[name] = float(np.mean(aucs)) if aucs else 0.5
+            logger.info(f"[{name}] CV AUC: {self.member_cv_aucs_[name]:.4f}")
+
+        # ensemble CV metric
         if self.method == "stacking":
             from sklearn.linear_model import LogisticRegression
             self._stacker = LogisticRegression(C=self.meta.get("C", 1.0), max_iter=200)
             self._stacker.fit(P_oof.values, y_oof.values)
-            logger.info("Final stacking meta-model fitted on out-of-fold predictions.")
+            logger.info("Stacking meta-model fitted.")
+            self.ensemble_cv_auc_ = roc_auc_score(y_oof, self._stacker.predict_proba(P_oof.values)[:, 1])
+        else:
+            self.ensemble_cv_auc_ = float(np.mean(list(self.member_cv_aucs_.values())))
+            logger.info(f"Ensemble CV metric: {self.ensemble_cv_auc_:.4f}")
 
-            # --- Calculate a more realistic ensemble CV AUC ---
-            # We can do this by fitting a temp stacker on the first N-1 folds' OOF preds
-            # and scoring on the last fold. This is a simplification but much better.
-            for fold in range(1, tscv.n_splits):
-                train_preds = pd.concat(out_of_fold_predictions[:fold])
-                train_true = pd.concat(out_of_fold_true_values[:fold])
-                val_preds = out_of_fold_predictions[fold]
-                val_true = out_of_fold_true_values[fold]
+        # refit base models on all data
+        for name, model in self.members.items():
+            model.fit(X, y)
 
-                temp_stacker = LogisticRegression(C=self.meta.get("C", 1.0), max_iter=200)
-                temp_stacker.fit(train_preds.values, train_true.values)
-                p_meta_val = temp_stacker.predict_proba(val_preds.values)[:, 1]
-                meta_aucs.append(roc_auc_score(y_val, p_meta_val))
-
-            self.ensemble_cv_auc_ = float(np.mean(meta_aucs)) if meta_aucs else 0.5
-            logger.info(f"Ensemble CV AUC (stacking, corrected): {self.ensemble_cv_auc_:.4f}")
-
-            # --- Fit the final base models on ALL data for future predictions ---
-            logger.info("Refitting base models on all data for future predict() calls...")
-            for name, model in self.members.items():
-                model.fit(X, y)
-            
-            # Optional isotonic calibration for the final stacker
-            p_meta_full = self._stacker.predict_proba(P_oof.values)[:, 1]
-            self._meta_calibrator = IsotonicRegression(out_of_bounds='clip')
-            self._meta_calibrator.fit(p_meta_full, y_oof.values)
-            logger.info("Meta-model isotonic calibration complete.")
-
-        else: # For non-stacking methods
-            member_aucs = [np.mean(aucs) for aucs in member_cv_aucs.values() if aucs]
-            self.ensemble_cv_auc_ = float(np.mean(member_aucs)) if member_aucs else 0.5
-            logger.info(f"Ensemble CV AUC (average members): {self.ensemble_cv_auc_:.4f}")
+        # threshold optimization
+        if prices is not None:
+            self._optimize_threshold(y_oof, P_oof.mean(axis=1), prices.iloc[-len(y_oof):])
 
         return self
 
+    def _optimize_threshold(self, y_true, y_pred_probs, prices: pd.Series):
+        """Optimize classification threshold based on chosen metric."""
+        if self.threshold_grid == "auto":
+            thresholds = np.linspace(0.3, 0.7, 21)  # focus around 0.5
+        else:
+            thresholds = np.linspace(0.0, 1.0, 101)
+
+        best_thr, best_score = 0.5, -np.inf
+        for thr in thresholds:
+            preds = (y_pred_probs >= thr).astype(int)
+
+            if self.threshold_metric == "f1":
+                score = f1_score(y_true, preds)
+            elif self.threshold_metric == "precision":
+                score = precision_score(y_true, preds)
+            elif self.threshold_metric == "recall":
+                score = recall_score(y_true, preds)
+            elif self.threshold_metric == "custom_pnl":
+                score = custom_pnl(
+                    y_true, preds, prices,
+                    **self.trading_costs
+                )
+            else:
+                score = f1_score(y_true, preds)
+
+            if score > best_score:
+                best_thr, best_score = thr, score
+
+        self.best_threshold_ = best_thr
+        logger.info(f"Optimized threshold: {best_thr:.3f} (metric={self.threshold_metric}, score={best_score:.4f})")
+        return best_thr
+
     def predict_proba(self, X: pd.DataFrame) -> pd.Series:
-        """
-        Return calibrated probability of "up" for ensemble
-        """
+        """Return calibrated probability of 'up' for ensemble"""
         Pcols = [m.predict_proba(X).rename(n) for n, m in self.members.items()]
         P = pd.concat(Pcols, axis=1)
-        logger.debug(f"Ensemble predicting: input shape={X.shape}, member probs shape={P.shape}")
 
         if self.method == "soft_vote":
-            w = np.array([self.weights.get(k, 1.0) for k in P.columns], dtype=float)
+            w = np.array([self.dynamic_ensemble.weights.get(k, 1.0) for k in P.columns], dtype=float)
             w /= w.sum()
             p_final = (P.values * w).sum(axis=1)
 
         elif self.method == "stacking" and self._stacker is not None:
             p_final = self._stacker.predict_proba(P.values)[:, 1]
-            if self._meta_calibrator is not None:
-                p_final = self._meta_calibrator.transform(p_final)
 
         elif self.method == "risk_weighted":
             eps = 1e-9
@@ -178,5 +286,3 @@ class Ensemble:
             p_final = P.mean(axis=1).values
 
         return pd.Series(p_final, index=P.index, name="p_up")
-
-    

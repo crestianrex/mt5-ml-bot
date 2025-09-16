@@ -1,14 +1,21 @@
-### `src/strategy_base.py`
-
-from __future__ import annotations
+# src/strategy_base.py
+from abc import ABC, abstractmethod
 import pandas as pd
 
-class Strategy:
+class Strategy(ABC):
+    """
+    Abstract base class for a trading strategy.
+    """
+    @abstractmethod
     def fit(self, X: pd.DataFrame, y: pd.Series):
+        """
+        Fit the strategy/model to historical data.
+        """
         raise NotImplementedError
 
+    @abstractmethod
     def predict_proba(self, X: pd.DataFrame) -> pd.Series:
+        """
+        Return the probability of the positive class (e.g., price going up).
+        """
         raise NotImplementedError
-
-    def online_update(self, X_new: pd.DataFrame, y_new: pd.Series, X_hist=None, y_hist=None):
-        pass

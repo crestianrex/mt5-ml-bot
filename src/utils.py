@@ -1,3 +1,4 @@
+# src/utils.py
 from __future__ import annotations
 import os
 import pickle
@@ -30,19 +31,19 @@ def load_optuna_params(symbol: str) -> dict | None:
         return None
     
     with open(file_path, "rb") as f:
-        best_params_flat = pickle.load(f)
-        
-    model_params = {"lgbm": {}, "xgb": {}, "rf": {}, "logreg": {}}
-    for k, v in best_params_flat.items():
-        for model_name in model_params:
-            if k.startswith(model_name):
-                param_name = k[len(model_name)+1:]
-                model_params[model_name][param_name] = v
-                
+        loaded_params = pickle.load(f) # Renamed to loaded_params
+
+    # Extract the 'models' dictionary from the loaded parameters
+    if 'models' not in loaded_params:
+        logger.warning(f"[{symbol}] 'models' key not found in Optuna params from {file_path}. Using empty model params.")
+        return {"lgbm": {}, "xgb": {}, "rf": {}, "logreg": {}} # Return empty structure if 'models' key is missing
+
+    model_params = loaded_params['models'] # This is the key change
+
     logger.info(f"[{symbol}] Loaded Optuna best params from {file_path}")
     return model_params
 
-def get_training_data(cfg: Cfg, symbol: str, source: str = "mt5") -> tuple[pd.DataFrame, pd.Series, pd.DataFrame]:
+def get_training_data(cfg: Cfg, symbol: str, source: str = "csv") -> tuple[pd.DataFrame, pd.Series, pd.DataFrame]:
     """Fetches historical data and builds features and labels."""
     
     if source == "mt5":
@@ -60,7 +61,7 @@ def get_training_data(cfg: Cfg, symbol: str, source: str = "mt5") -> tuple[pd.Da
         
     logger.info(f"[{symbol}] Building features...")
     feature_cfg = FeatureCfg(**cfg.features.__dict__)
-    X = build_features(df, feature_cfg, symbol=symbol, timeframe_minutes=cfg.timeframe)
+    X = build_features(df, feature_cfg, symbol=symbol, timeframe_minutes=cfg.timeframe_seconds() // 60)
     
     logger.info(f"[{symbol}] Building labels...")
     y = binary_up_down(df, cfg.prediction_horizon)
