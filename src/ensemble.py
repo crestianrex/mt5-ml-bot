@@ -68,8 +68,12 @@ class DynamicWeightedEnsemble:
         self.base_models = base_models
         self.decay = decay
         self.min_weight = min_weight
-        self.model_scores = defaultdict(lambda: 0.5)  # init with neutral AUC
+        self.model_scores = defaultdict(DynamicWeightedEnsemble._get_default_score)  # init with neutral AUC
         self.weights = {name: 1.0 / len(base_models) for name in base_models}
+
+    @staticmethod
+    def _get_default_score():
+        return 0.5
 
     def update_weights(self, X_val, y_val):
         """Update model weights based on latest validation performance."""

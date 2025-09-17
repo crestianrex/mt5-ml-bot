@@ -57,11 +57,9 @@ def objective(trial, df: pd.DataFrame, y: pd.Series, static_features: pd.DataFra
         # --- 1. Suggest Feature Parameters ---
         feature_params_raw = suggest_params(trial, "feature", yaml_cfg.get("features", {}))
 
-        roc_lags_options_raw = yaml_cfg.get("roc_lags_options", [
+        roc_lags_options = yaml_cfg.get("roc_lags_options", [
             [1, 3, 5, 10], [1, 2, 4, 8], [2, 5, 10, 15], [1, 2, 3]
         ])
-        # Convert lists to tuples for Optuna's categorical choice
-        roc_lags_options = [tuple(l) for l in roc_lags_options_raw]
 
         if "roc_lags" in feature_params_raw:
             del feature_params_raw["roc_lags"]

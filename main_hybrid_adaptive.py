@@ -7,6 +7,7 @@ from loguru import logger
 import pandas as pd
 
 from src.config import Cfg
+import MetaTrader5 as mt5
 from src.mt5_client import MT5Client
 from src.risk import RiskManager
 from src.execution import Execution
@@ -23,12 +24,11 @@ def print_dashboard(cfg, risk, ens_per_symbol, X_per_symbol, bar_counter):
     if bar_counter % cfg.dashboard_every_bars != 0:
         return  # throttle dashboard logging
 
-    import MetaTrader5 as mt5
     account_info = mt5.account_info()
     equity = account_info.equity if account_info else 0
     balance = account_info.balance if account_info else 0
     drawdown = 1 - equity / balance if balance else 0
-    total_open_risk = sum([pos.risk for pos in risk.open_positions_cache.values()])
+    total_open_risk = sum([pos['risk'] for pos in risk.open_positions_cache.values()])
 
     logger.info("=== PORTFOLIO DASHBOARD ===")
     logger.info(f"Equity: {equity:.2f} | Balance: {balance:.2f} | Drawdown: {drawdown:.3%} | Total Open Risk: {total_open_risk:.3%}")
@@ -63,7 +63,7 @@ def run(dry_run: bool = False):
     logger.info(f"Max portfolio risk: {cfg.risk.max_portfolio_risk:.2%}")
     logger.info(f"ATR SL multiplier: {cfg.risk.atr_multiplier_sl}, Trailing ATR: {cfg.risk.trailing_atr_mult}")
     logger.info(f"Dynamic risk enabled: {cfg.risk.dynamic_risk['enabled']}, Dynamic TP enabled: {cfg.risk.dynamic_tp['enabled']}")
-    logger.info(f"Ensemble method: {cfg.ensemble.method}, Threshold metric: {cfg.ensemble.threshold_metric}")
+    logger.info(f"Ensemble method: {cfg.ensemble['method']}, Threshold metric: {cfg.ensemble['threshold_metric']}")
 
     # --- MT5 Connection ---
     mt5c = MT5Client(
@@ -125,10 +125,9 @@ def run(dry_run: bool = False):
                     exe.manage_trades(sym, atr)
 
                     # --- Update portfolio-level open risk AFTER managing trades ---
-                    total_open_risk = sum([pos.risk for pos in risk.open_positions_cache.values()])
+                    total_open_risk = sum([pos['risk'] for pos in risk.open_positions_cache.values()])
 
                     # --- Check trading permission ---
-                    import MetaTrader5 as mt5
                     account_info = mt5.account_info()
                     equity = account_info.equity if account_info else 0
                     balance = account_info.balance if account_info else 0

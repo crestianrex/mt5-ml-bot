@@ -105,6 +105,19 @@ class Execution:
             return OrderResult(False, None, f"Order failed after retries: {result}")
 
         logger.info(f"Order executed: ticket={result.order}, dir={direction}, lots={lots}, SL={sl}, TP={tp}")
+        
+        # Calculate effective risk for the position
+        risk_per_trade = self.risk._get_dynamic_value(self.risk.cfg.dynamic_risk, auc_score,
+                                                 getattr(self.risk.cfg, 'risk_per_trade', 0.005))
+        account_info = mt5.account_info()
+        equity = account_info.equity
+        risk_amt = equity * risk_per_trade
+        sl_distance = self.risk.cfg.atr_multiplier_sl * atr
+        pip_size = symbol_info.point
+        pip_value = pip_size * symbol_info.trade_contract_size
+        effective_risk = risk_amt / (sl_distance * pip_value) * pip_size # This is the risk in lots
+
+        self.risk.open_positions_cache[symbol] = {"risk": effective_risk, "ticket": result.order}
         return OrderResult(True, result.order, "OK")
 
     # --- Manage open positions ---
