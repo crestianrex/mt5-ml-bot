@@ -3,7 +3,7 @@
 from __future__ import annotations
 import pandas as pd
 import numpy as np
-import MetaTrader5 as mt5
+import MetaTrader5 as mt5 # type: ignore
 from loguru import logger
 
 TF_MAP = {

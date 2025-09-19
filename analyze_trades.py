@@ -1,6 +1,6 @@
 import pandas as pd
 
-df = pd.read_csv("/home/kyani/Desktop/new/mt5-ml-bot/results/trades_hybrid_adaptive.csv")
+df = pd.read_csv("/results/trades_hybrid_adaptive.csv")
 
 # Convert time columns to datetime objects FIRST
 df['entry_time'] = pd.to_datetime(df['entry_time'])

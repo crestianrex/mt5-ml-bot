@@ -55,7 +55,7 @@ class RiskManager:
         return round(lots, 2)
 
     # --- SL/TP targets ---
-    def stop_targets(self, price: float, atr: float, direction: str, auc_score: float):
+    def stop_targets(self, price: float, atr: float, direction: str, auc_score: float, symbol: str):
         sl_mult = self.cfg.atr_multiplier_sl
         tp_mult = self._get_dynamic_value(self.cfg.dynamic_tp, auc_score,
                                           getattr(self.cfg, 'atr_multiplier_tp', 2.5))
@@ -86,9 +86,19 @@ class RiskManager:
 
     # --- Manage open positions: BE + ATR trailing ---
     def manage_open_positions(self, symbol: str, atr: float):
-        import MetaTrader5 as mt5
-        positions = mt5.positions_get(symbol=symbol)
-        if not positions:
+        import MetaTrader5 as mt5 # type: ignore
+        
+        # Get actual open positions from MT5
+        mt5_positions = mt5.positions_get(symbol=symbol)
+        
+        # Update cache: remove closed positions
+        current_mt5_tickets = {pos.ticket for pos in mt5_positions}
+        tickets_to_remove = [ticket for ticket, pos_data in self.open_positions_cache.items() if pos_data["ticket"] not in current_mt5_tickets]
+        for ticket in tickets_to_remove:
+            del self.open_positions_cache[ticket]
+            logger.info(f"[{symbol}] Removed closed position {ticket} from cache.")
+
+        if not mt5_positions:
             logger.debug(f"[{symbol}] No open positions")
             return
 
@@ -103,7 +113,7 @@ class RiskManager:
             logger.warning(f"[{symbol}] Tick info unavailable")
             return
 
-        for pos in positions:
+        for pos in mt5_positions:
             entry = pos.price_open
             sl = pos.sl
             direction = "long" if pos.type == mt5.ORDER_TYPE_BUY else "short"

@@ -7,7 +7,7 @@ from loguru import logger
 import pandas as pd
 
 from src.config import Cfg
-import MetaTrader5 as mt5
+import MetaTrader5 as mt5 # type: ignore
 from src.mt5_client import MT5Client
 from src.risk import RiskManager
 from src.execution import Execution
@@ -89,9 +89,7 @@ def run(dry_run: bool = False):
             for sym in cfg.symbols:
                 try:
                     # --- Fetch latest bar data (minimal history for speed) ---
-                    temp_cfg = Cfg.from_yaml("config.yaml")
-                    temp_cfg.history_bars = 500
-                    data, X, y = get_training_data(temp_cfg, sym)
+                    data, X, y = get_training_data(cfg, sym, count=40, source="mt5")
                     if data.empty:
                         continue
 

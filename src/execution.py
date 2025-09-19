@@ -1,7 +1,7 @@
 # src/execution.py
 from __future__ import annotations
 from dataclasses import dataclass
-import MetaTrader5 as mt5
+import MetaTrader5 as mt5 # type: ignore
 from loguru import logger
 import numpy as np
 from .ensemble import Ensemble
@@ -76,7 +76,7 @@ class Execution:
         # --- Initial SL/TP ---
         tick = mt5.symbol_info_tick(symbol)
         price = tick.ask if direction == "long" else tick.bid
-        sl, tp = self.risk.stop_targets(price, atr, direction, auc_score)
+        sl, tp = self.risk.stop_targets(price, atr, direction, auc_score, symbol)
 
         # --- Prepare order request ---
         type_map = {"long": mt5.ORDER_TYPE_BUY, "short": mt5.ORDER_TYPE_SELL}

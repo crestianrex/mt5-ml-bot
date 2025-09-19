@@ -42,8 +42,8 @@ def fetch_bars(symbol: str, timeframe: str, count: int) -> pd.DataFrame:
 
         df = df[expected_cols] # Ensure column order
 
-        # Optionally, truncate data if 'count' is less than available bars
-        if len(df) > count:
+        # Optionally, truncate data if 'count' is less than available bars and count is not None
+        if count is not None and len(df) > count:
             df = df.tail(count)
             logger.debug(f"Truncated loaded data to {len(df)} bars (requested {count}).")
 

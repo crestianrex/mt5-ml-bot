@@ -21,7 +21,7 @@ from sklearn.metrics import roc_auc_score
 # --- Detect Colab and set path ---
 # Assumes drive is already mounted if running in Colab.
 try:
-    import google.colab
+    import google.colab # type: ignore
     # This path should point to the location in your Google Drive where params are stored.
     PARAMS_DIR = "/content/drive/MyDrive/mt5_ml_bot_params/optuna_params"
     IN_COLAB = True

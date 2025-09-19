@@ -1,4 +1,4 @@
-# /home/kyani/Desktop/new/mt5-ml-bot/train_adaptive.py
+# train_adaptive.py
 from loguru import logger
 from dotenv import load_dotenv # Added
 

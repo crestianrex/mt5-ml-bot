@@ -43,9 +43,16 @@ def load_optuna_params(symbol: str) -> dict | None:
     logger.info(f"[{symbol}] Loaded Optuna best params from {file_path}")
     return model_params
 
-def get_training_data(cfg: Cfg, symbol: str, source: str = "csv") -> tuple[pd.DataFrame, pd.Series, pd.DataFrame]:
+def get_training_data(cfg: Cfg, symbol: str, count: int | None = None, source: str = "csv", load_all_data: bool = False) -> tuple[pd.DataFrame, pd.Series, pd.DataFrame]:
     """Fetches historical data and builds features and labels."""
-    
+
+    if load_all_data:
+        fetch_count = None # Instruct fetch_bars to load all available data
+        logger.info(f"[{symbol}] Fetching ALL available bars for timeframe {cfg.timeframe} from {source.upper()}...")
+    else:
+        fetch_count = count if count is not None else cfg.history_bars
+        logger.info(f"[{symbol}] Fetching {fetch_count} bars for timeframe {cfg.timeframe} from {source.upper()}...")
+
     if source == "mt5":
         from src.data import fetch_bars, merge_features_labels
         logger.info(f"[{symbol}] Fetching {cfg.history_bars} bars for timeframe {cfg.timeframe} from MT5...")

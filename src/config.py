@@ -31,20 +31,20 @@ class RiskCfg:
     block_on_drawdown: float = 0.10
     transaction_cost_pips: float = 1.5
     session_filter: Dict[str, str] | None = None
-    min_ensemble_auc: float = 0.70
+    min_ensemble_auc: float = 0.55
     dynamic_risk: Dict[str, Any] | None = field(default_factory=lambda: {
         "enabled": True,
         "base_risk": 0.005,
         "max_risk": 0.01,
-        "auc_floor": 0.70,
-        "auc_ceiling": 0.85
+        "auc_floor": 0.55,
+        "auc_ceiling": 0.65
     })
     dynamic_tp: Dict[str, Any] | None = field(default_factory=lambda: {
         "enabled": True,
         "base_tp_mult": 2.0,
         "max_tp_mult": 3.5,
-        "auc_floor": 0.70,
-        "auc_ceiling": 0.85
+        "auc_floor": 0.55,
+        "auc_ceiling": 0.65
     })
 
 @dataclass
