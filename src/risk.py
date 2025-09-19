@@ -4,102 +4,107 @@ import pandas as pd
 import numpy as np
 from loguru import logger
 from .config import RiskCfg
+import MetaTrader5 as mt5  # type: ignore
+
 
 class RiskManager:
     """
-    RiskManager handles:
-    - Dynamic position sizing based on model confidence (AUC)
-    - SL/TP calculations with dynamic ATR multipliers
-    - Portfolio-level exposure cap
-    - Breakeven and ATR trailing for open positions
+    RiskManager handles dynamic position sizing, SL/TP, portfolio exposure caps and open-position bookkeeping.
+    open_positions_cache: { symbol: {"risk": float, "ticket": int} }
     """
 
     def __init__(self, cfg: RiskCfg):
         self.cfg = cfg
         self.equity_peak = None
-        self.open_positions_cache = {}  # symbol -> {"risk": float, "ticket": int}
+        self.open_positions_cache: dict[str, dict] = {}
 
-    # --- Dynamic value calculation ---
-    def _get_dynamic_value(self, dynamic_cfg: dict, auc_score: float, default_val: float) -> float:
+    def _get_dynamic_value(self, dynamic_cfg: dict | None, auc_score: float, default_val: float) -> float:
         if not dynamic_cfg or not dynamic_cfg.get("enabled"):
-            return default_val
+            return float(default_val)
+        auc_floor = float(dynamic_cfg.get("auc_floor", 0.55))
+        auc_ceiling = float(dynamic_cfg.get("auc_ceiling", 0.65))
+        base_val = float(dynamic_cfg.get("base_risk", dynamic_cfg.get("base_tp_mult", default_val)))
+        max_val = float(dynamic_cfg.get("max_risk", dynamic_cfg.get("max_tp_mult", default_val)))
+        clamped = float(np.clip(auc_score, auc_floor, auc_ceiling))
+        denom = max(auc_ceiling - auc_floor, 1e-6)
+        val = base_val + (clamped - auc_floor) * (max_val - base_val) / denom
+        logger.debug(f"Dynamic value calc: AUC={auc_score:.4f}, Clamped={clamped:.4f}, Value={val:.4f}")
+        return float(val)
 
-        auc_floor = dynamic_cfg.get("auc_floor", 0.55)
-        auc_ceiling = dynamic_cfg.get("auc_ceiling", 0.65)
-        base_val = dynamic_cfg.get("base_risk") or dynamic_cfg.get("base_tp_mult")
-        max_val = dynamic_cfg.get("max_risk") or dynamic_cfg.get("max_tp_mult")
-
-        clamped_auc = np.clip(auc_score, auc_floor, auc_ceiling)
-        val = base_val + (clamped_auc - auc_floor) * (max_val - base_val) / max(auc_ceiling - auc_floor, 1e-6)
-        logger.debug(f"Dynamic value calc: AUC={auc_score:.4f}, Clamped={clamped_auc:.4f}, Value={val:.4f}")
-        return val
-
-    # --- Position sizing with portfolio exposure cap ---
-    def position_size(self, equity: float, atr: float, pip_value: float, pip_size: float,
-                      auc_score: float, total_open_risk: float = 0.0) -> float:
-        risk_per_trade = self._get_dynamic_value(self.cfg.dynamic_risk, auc_score,
-                                                 getattr(self.cfg, 'risk_per_trade', 0.005))
-        # enforce portfolio-level cap
-        max_risk_allowed = self.cfg.max_portfolio_risk - total_open_risk
-        effective_risk = min(risk_per_trade, max(0.0, max_risk_allowed))
-        risk_amt = equity * effective_risk
-
-        sl_distance = self.cfg.atr_multiplier_sl * atr
-        if sl_distance <= 0:
-            logger.warning("SL distance <= 0, cannot compute lots")
+    def position_size(self, equity: float, atr: float, pip_value: float, pip_size: float, auc_score: float, total_open_risk: float = 0.0) -> float:
+        risk_per_trade = self._get_dynamic_value(self.cfg.dynamic_risk, auc_score, getattr(self.cfg, "risk_per_trade", 0.005))
+        max_risk_allowed = max(0.0, self.cfg.max_portfolio_risk - float(total_open_risk))
+        effective_risk = min(risk_per_trade, max_risk_allowed)
+        risk_amt = float(equity) * float(effective_risk)
+        sl_distance = float(self.cfg.atr_multiplier_sl) * float(atr)
+        if sl_distance <= 0 or pip_value <= 0:
+            logger.warning("Invalid SL distance or pip_value when computing position size")
             return 0.0
-
         units = risk_amt / (sl_distance * pip_value)
-        lots = np.clip(units * pip_size, 0.01, 5.0)
-        logger.info(f"Position sizing: equity={equity:.2f}, ATR={atr:.5f}, lots={lots:.2f}, effective_risk={effective_risk:.4f}")
+        lots = float(np.clip(units, 0.01, 100.0))
+        logger.info(f"Position sizing: equity={equity:.2f}, ATR={atr:.6f}, lots={lots:.4f}, effective_risk={effective_risk:.6f}")
+        # round to 2 decimal lots (depends on broker; adjust if necessary)
         return round(lots, 2)
 
-    # --- SL/TP targets ---
     def stop_targets(self, price: float, atr: float, direction: str, auc_score: float, symbol: str):
-        sl_mult = self.cfg.atr_multiplier_sl
-        tp_mult = self._get_dynamic_value(self.cfg.dynamic_tp, auc_score,
-                                          getattr(self.cfg, 'atr_multiplier_tp', 2.5))
+        sl_mult = float(self.cfg.atr_multiplier_sl)
+        tp_mult = float(self._get_dynamic_value(self.cfg.dynamic_tp, auc_score, float(self.cfg.atr_multiplier_tp)))
+        price = float(price)
+        atr = float(atr)
         if direction == "long":
             sl = price - sl_mult * atr
             tp = price + tp_mult * atr
         else:
             sl = price + sl_mult * atr
             tp = price - tp_mult * atr
-        logger.debug(f"Stop targets: dir={direction}, price={price:.5f}, SL={sl:.5f}, TP={tp:.5f}")
-        return sl, tp
+        logger.debug(f"Stop targets: dir={direction}, price={price:.6f}, SL={sl:.6f}, TP={tp:.6f}")
+        return float(sl), float(tp)
 
-    # --- Trading permission check ---
     def should_trade(self, now_local: pd.Timestamp, drawdown: float) -> bool:
         if drawdown >= self.cfg.block_on_drawdown:
-            logger.info(f"Trading blocked: drawdown {drawdown:.3f} >= max {self.cfg.block_on_drawdown}")
+            logger.info(f"Trading blocked: drawdown {drawdown:.3f} >= {self.cfg.block_on_drawdown}")
             return False
-
         sess = self.cfg.session_filter
         if sess:
-            start = pd.to_datetime(sess["start"]).time()
-            end = pd.to_datetime(sess["end"]).time()
-            allowed = start <= now_local.time() <= end
-            if not allowed:
-                logger.info(f"Trading blocked: outside session {start}-{end}, current={now_local.time()}")
-            return allowed
+            try:
+                start_t = pd.to_datetime(sess["start"]).time()
+                end_t = pd.to_datetime(sess["end"]).time()
+                allowed = start_t <= now_local.time() <= end_t
+                if not allowed:
+                    logger.info(f"Trading blocked: outside session {start_t}-{end_t}, current={now_local.time()}")
+                return allowed
+            except Exception:
+                logger.warning("Invalid session_filter in config; allowing trades by default.")
+                return True
         return True
 
-    # --- Manage open positions: BE + ATR trailing ---
     def manage_open_positions(self, symbol: str, atr: float):
-        import MetaTrader5 as mt5 # type: ignore
-        
-        # Get actual open positions from MT5
-        mt5_positions = mt5.positions_get(symbol=symbol)
-        
-        # Update cache: remove closed positions
-        current_mt5_tickets = {pos.ticket for pos in mt5_positions}
-        tickets_to_remove = [ticket for ticket, pos_data in self.open_positions_cache.items() if pos_data["ticket"] not in current_mt5_tickets]
-        for ticket in tickets_to_remove:
-            del self.open_positions_cache[ticket]
-            logger.info(f"[{symbol}] Removed closed position {ticket} from cache.")
+        """
+        Ensure open_positions_cache matches MT5 positions and apply BE/trailing rules.
+        open_positions_cache keys are symbols.
+        """
+        try:
+            mt5_positions = mt5.positions_get(symbol=symbol) or []
+            current_tickets = {int(p.ticket) for p in mt5_positions}
+        except Exception as e:
+            logger.exception(f"Failed to get MT5 positions for {symbol}: {e}")
+            return
+
+        # remove cache entries for which ticket is not present anymore
+        symbols_to_remove = []
+        for sym, pos_data in list(self.open_positions_cache.items()):
+            ticket = pos_data.get("ticket")
+            if ticket is None or ticket not in current_tickets:
+                symbols_to_remove.append(sym)
+        for sym in symbols_to_remove:
+            try:
+                del self.open_positions_cache[sym]
+                logger.info(f"[{sym}] Removed closed position from cache.")
+            except KeyError:
+                pass
 
         if not mt5_positions:
-            logger.debug(f"[{symbol}] No open positions")
+            logger.debug(f"[{symbol}] No open positions in MT5.")
             return
 
         symbol_info = mt5.symbol_info(symbol)
@@ -107,47 +112,51 @@ class RiskManager:
             logger.warning(f"[{symbol}] Symbol info unavailable")
             return
 
-        point = symbol_info.point
+        point = float(symbol_info.point)
         tick = mt5.symbol_info_tick(symbol)
         if not tick:
             logger.warning(f"[{symbol}] Tick info unavailable")
             return
 
         for pos in mt5_positions:
-            entry = pos.price_open
-            sl = pos.sl
-            direction = "long" if pos.type == mt5.ORDER_TYPE_BUY else "short"
+            entry = float(pos.price_open)
+            sl = float(getattr(pos, "sl", 0.0))
+            tp = float(getattr(pos, "tp", 0.0))
+            direction = "long" if int(pos.type) == int(mt5.ORDER_TYPE_BUY) else "short"
+            # profit in pips
+            if direction == "long":
+                profit_pips = (float(tick.bid) - entry) / point
+            else:
+                profit_pips = (entry - float(tick.ask)) / point
 
-            # Profit in pips
-            profit_pips = (tick.bid - entry) / point if direction == "long" else (entry - tick.ask) / point
-            one_r = self.cfg.atr_multiplier_sl * atr / point
+            one_r = (self.cfg.atr_multiplier_sl * float(atr)) / point
             new_sl = sl
 
-            # --- Breakeven at 1R ---
-            if direction == "long" and profit_pips >= one_r and sl < entry:
-                new_sl = entry
-            elif direction == "short" and profit_pips >= one_r and sl > entry:
+            # Breakeven at 1R
+            if profit_pips >= one_r and ((direction == "long" and sl < entry) or (direction == "short" and sl > entry)):
                 new_sl = entry
 
-            # --- ATR trailing ---
-            trailing = atr * self.cfg.trailing_atr_mult
+            # ATR trailing
+            trailing = float(atr) * float(self.cfg.trailing_atr_mult)
             if direction == "long":
-                new_sl = max(new_sl, tick.bid - trailing)
+                new_sl = max(new_sl, float(tick.bid) - trailing)
             else:
-                new_sl = min(new_sl, tick.ask + trailing)
+                new_sl = min(new_sl, float(tick.ask) + trailing)
 
-            # Update SL if changed
-            if new_sl != sl:
-                request = {
-                    "action": mt5.TRADE_ACTION_SLTP,
-                    "position": pos.ticket,
-                    "sl": new_sl,
-                    "tp": pos.tp,
-                }
-                result = mt5.order_send(request)
-                if result is None or result.retcode != mt5.TRADE_RETCODE_DONE:
-                    logger.error(f"[{symbol}] Failed SL update for ticket {pos.ticket}: {result}")
-                else:
-                    logger.info(f"[{symbol}] Updated SL for ticket {pos.ticket}: new SL={new_sl:.5f}")
+            if abs(new_sl - sl) > 1e-8:
+                try:
+                    request = {
+                        "action": mt5.TRADE_ACTION_SLTP,
+                        "position": int(pos.ticket),
+                        "sl": float(new_sl),
+                        "tp": float(tp),
+                    }
+                    result = mt5.order_send(request)
+                    if result is None or getattr(result, "retcode", None) != getattr(mt5, "TRADE_RETCODE_DONE", 10009):
+                        logger.error(f"[{symbol}] Failed SL update for ticket {pos.ticket}: {result}")
+                    else:
+                        logger.info(f"[{symbol}] Updated SL for ticket {pos.ticket}: new SL={new_sl:.6f}")
+                except Exception as e:
+                    logger.exception(f"[{symbol}] Exception updating SL for ticket {pos.ticket}: {e}")
             else:
                 logger.debug(f"[{symbol}] No SL adjustment needed for ticket {pos.ticket}")
