@@ -18,6 +18,9 @@ wheels/
 logs/
 data/cache/
 models/
+optuna_params/
+data/
+config2.yaml
 # Environment variables
 .env
 # OS generated files
