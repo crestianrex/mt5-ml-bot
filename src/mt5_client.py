@@ -5,15 +5,8 @@ from typing import Optional
 import MetaTrader5 as mt5  # type: ignore
 from loguru import logger
 
-
 class MT5Client:
-    """
-    Safe wrapper around MetaTrader5 initialization and login.
-    Usage:
-      m = MT5Client(login, password, server, path)
-      ok = m.connect()
-      if ok: ... m.shutdown()
-    """
+    """ Safe wrapper around MetaTrader5 initialization and login. """
 
     def __init__(
         self,
@@ -31,12 +24,15 @@ class MT5Client:
         self.max_retries = max_retries
         self.retry_delay = retry_delay
         self._connected = False
-        # attempt safe coercion to int; if fails we'll try login() later (mt5.login may accept int)
-        try:
-            self.login = int(login) if login is not None and str(login).strip() != "" else None
-        except Exception:
-            logger.warning("MT5Client: login cannot be converted to int; will try as string at login()")
-            self.login = None
+
+        # attempt coercion to int but keep original if not possible
+        self.login = None
+        if login is not None and str(login).strip() != "":
+            try:
+                self.login = int(login)
+            except Exception:
+                # could be string-based login – keep the raw value for mt5.login
+                self.login = login
 
     def connect(self) -> bool:
         last_err = None
@@ -51,7 +47,6 @@ class MT5Client:
                     time.sleep(self.retry_delay)
                     continue
 
-                # If credentials provided, attempt explicit login
                 if self.login is not None and self.password and self.server:
                     logger.info("MT5Client: attempting explicit mt5.login()")
                     authorized = mt5.login(self.login, password=self.password, server=self.server)
@@ -63,7 +58,7 @@ class MT5Client:
                         continue
                     logger.info("MT5 login OK")
                 else:
-                    # No creds: assume terminal already logged in; validate by checking account_info()
+                    # No creds: validate terminal login
                     acct = mt5.account_info()
                     if acct is None:
                         last_err = mt5.last_error()

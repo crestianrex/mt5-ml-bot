@@ -1,5 +1,7 @@
 # src/strategy_ml.py
 from __future__ import annotations
+import os
+import pickle
 import pandas as pd
 import numpy as np
 from sklearn.ensemble import RandomForestClassifier
@@ -24,7 +26,6 @@ except Exception:
 # Min samples required to safely train a model and get a reliable CV score
 MIN_SAMPLES_FOR_FIT = 150
 
-
 class MLStrategy:
     def __init__(self, model="lgbm", random_state: int = 42, calibrate: bool = True, cv_samples_per_split: int = 300, **kwargs):
         self.model_name = model.lower()
@@ -34,8 +35,6 @@ class MLStrategy:
         model_params = kwargs.copy()
         device = model_params.pop("device", "cpu")
         self._calibrator = None
-
-        # seed numpy for reproducibility of any random ops here
         np.random.seed(self.random_state)
 
         if self.model_name == "rf":
@@ -84,8 +83,7 @@ class MLStrategy:
             self.supports_online = False
             self._pipe = Pipeline([("clf", base)])
 
-        elif self.model_name == "logreg" or self.model_name == "sgd":
-            # Use SGD for online-capable logistic-like model
+        elif self.model_name in ("logreg", "sgd"):
             sgd = SGDClassifier(loss="log_loss", learning_rate="optimal", max_iter=1000, tol=1e-3, warm_start=True, random_state=self.random_state)
             self.supports_online = True
             self._pipe = Pipeline([("scaler", StandardScaler(with_mean=False)), ("clf", sgd)])
@@ -93,16 +91,75 @@ class MLStrategy:
         else:
             raise ValueError(f"Unknown model '{self.model_name}'")
 
+    def save_model(self, path: str):
+        """Saves the model and calibrator to a directory."""
+        os.makedirs(path, exist_ok=True)
+        model_file = os.path.join(path, f"model.{self.model_name}")
+        calibrator_file = os.path.join(path, "calibrator.pkl")
+        meta_file = os.path.join(path, "meta.pkl")
+
+        # Save the core model
+        if self.model_name == "xgb":
+            self._pipe.named_steps['clf'].save_model(model_file)
+        else: # rf, sgd, etc.
+            with open(model_file, "wb") as f:
+                pickle.dump(self._pipe, f)
+
+        # Save calibrator if it exists
+        if self._calibrator:
+            with open(calibrator_file, "wb") as f:
+                pickle.dump(self._calibrator, f)
+        
+        # Save metadata
+        meta = {"cv_auc_": getattr(self, "cv_auc_", 0.5)}
+        with open(meta_file, "wb") as f:
+            pickle.dump(meta, f)
+
+        logger.info(f"Saved model {self.model_name} to {path}")
+
+    def load_model(self, path: str):
+        """Loads the model and calibrator from a directory."""
+        model_file = os.path.join(path, f"model.{self.model_name}")
+        calibrator_file = os.path.join(path, "calibrator.pkl")
+        meta_file = os.path.join(path, "meta.pkl")
+
+        if not os.path.exists(model_file):
+            logger.warning(f"Model file not found at {model_file}, cannot load.")
+            return
+
+        # Load the core model
+        if self.model_name == "xgb":
+            self._pipe.named_steps['clf'].load_model(model_file)
+        else: # rf, sgd, etc.
+            with open(model_file, "rb") as f:
+                self._pipe = pickle.load(f)
+        
+        # Load calibrator if it exists
+        if os.path.exists(calibrator_file):
+            with open(calibrator_file, "rb") as f:
+                self._calibrator = pickle.load(f)
+        else:
+            self._calibrator = None
+
+        # Load metadata
+        if os.path.exists(meta_file):
+            with open(meta_file, "rb") as f:
+                meta = pickle.load(f)
+            self.cv_auc_ = meta.get("cv_auc_", 0.5)
+        
+        logger.info(f"Loaded model {self.model_name} from {path}")
+
     def _sanitize(self, X: pd.DataFrame) -> pd.DataFrame:
         return X.replace([np.inf, -np.inf], np.nan).ffill().bfill().dropna()
 
     def fit(self, X: pd.DataFrame, y: pd.Series):
         Xc = self._sanitize(X)
         yc = y.reindex(Xc.index)
+
         if len(Xc) < MIN_SAMPLES_FOR_FIT:
             logger.warning(f"Not enough data to fit model: {len(Xc)} < {MIN_SAMPLES_FOR_FIT}. Skipping fit.")
             self.cv_auc_ = 0.5
-            return self
+            return False
 
         n_splits = min(5, max(2, len(Xc) // self.cv_samples_per_split))
         tscv = TimeSeriesSplit(n_splits=n_splits)
@@ -123,22 +180,25 @@ class MLStrategy:
 
         self.cv_auc_ = float(np.mean(scores)) if scores else 0.5
 
-        # Fit final model on last split (or on all data if no cv)
+        # Fit final model ON ALL available data for best generalization
         try:
-            if last_tr_idx is not None and last_va_idx is not None:
-                self._pipe.fit(Xc.iloc[last_tr_idx], yc.iloc[last_tr_idx])
-            else:
-                self._pipe.fit(Xc, yc)
+            self._pipe.fit(Xc, yc)
         except Exception as e:
-            logger.exception(f"Final fit failed: {e}")
-            self.cv_auc_ = 0.5
-            return self
+            logger.exception(f"Final fit failed on all data: {e}")
+            # fallback: try last split if present
+            try:
+                if last_tr_idx is not None and last_va_idx is not None:
+                    self._pipe.fit(Xc.iloc[last_tr_idx], yc.iloc[last_tr_idx])
+                else:
+                    self._pipe.fit(Xc, yc)
+            except Exception as ex:
+                logger.exception(f"Fallback final fit failed: {ex}")
+                self.cv_auc_ = 0.5
+                return self
 
-        # Try calibration if requested
+        # Try calibration if requested (optional and slow)
         if self.calibrate:
             try:
-                # Use CalibratedClassifierCV which will internally refit if cv is integer,
-                # wrapping the whole pipeline. This is slower but safer and consistent.
                 self._calibrator = CalibratedClassifierCV(self._pipe, cv=3, method="isotonic")
                 self._calibrator.fit(Xc, yc)
                 logger.info("Calibration finished")
@@ -146,10 +206,9 @@ class MLStrategy:
                 logger.warning(f"Calibration failed or unsupported: {e}")
                 self._calibrator = None
 
-        return self
+        return True
 
     def _proba_raw(self, X: pd.DataFrame):
-        # Return numpy array of probabilities for the positive class (1)
         try:
             if hasattr(self._pipe, "predict_proba"):
                 arr = self._pipe.predict_proba(X)[:, 1]
@@ -158,7 +217,6 @@ class MLStrategy:
             if clf is not None and hasattr(clf, "decision_function"):
                 dec = clf.decision_function(X)
                 return 1.0 / (1.0 + np.exp(-dec))
-            # fallback uniform
             return np.full(len(X), 0.5)
         except Exception as e:
             logger.exception(f"_proba_raw failed: {e}")
@@ -171,7 +229,6 @@ class MLStrategy:
             logger.warning("Online update skipped: empty new data")
             return
 
-        # If underlying classifier supports partial_fit, use that for speed
         clf = self._pipe.named_steps.get("clf")
         if hasattr(clf, "partial_fit") and self.supports_online:
             try:
@@ -181,7 +238,6 @@ class MLStrategy:
                 # optionally refresh calibrator lightly
                 if self.calibrate:
                     try:
-                        # retrain calibrator on recent sample
                         self._calibrator = CalibratedClassifierCV(self._pipe, cv=3, method="isotonic")
                         self._calibrator.fit(Xn, yn)
                     except Exception:

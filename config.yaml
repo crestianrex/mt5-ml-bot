@@ -2,9 +2,10 @@
 
 # --- General Settings ---
 use_gpu: false # Master switch to enable GPU acceleration for supported models (lgbm, xgb)
+data_source: csv # "mt5" or "csv". Automatically switches to csv on non-windows
 
 # --- Optuna Tuning Specifics ---
-optuna_n_trials: 150
+optuna_n_trials: 150  # 150
 n_jobs: -1 # Number of parallel jobs for tuning. -1 means all available CPU cores.
 roc_lags_options:
   - [1, 3, 5, 10]
@@ -18,9 +19,9 @@ cv_samples_per_split: 300 # Affects number of splits in TimeSeriesSplit. Higher 
 # --- Symbols & timeframe ---
 symbols: ["EURUSD#", "GBPUSD#", "USDJPY#"] #"EURUSD#", "GBPUSD#", "USDJPY#"
 timeframe: "M5"            # One of: M1, M5, M15, M30, H1, H4
-history_bars: 6048          # How many bars to pull when (re)starting #6048 18000 36000
+history_bars: 36000          # How many bars to pull when (re)starting #6048 18000 36000
 retrain_every_bars: 250     # Incremental retrain every N bars
-prediction_horizon: 6       # Bars ahead for label (~30 min on M5)
+prediction_horizon: 3       # 6 Bars ahead for label (~30 min on M5)
 
 # --- Features (now tunable) ---
 features:

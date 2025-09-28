@@ -15,12 +15,11 @@ dist/
 wheels/
 *.egg-info/
 # Logs and data
+data/
 logs/
-data/cache/
 models/
 optuna_params/
-data/
-config2.yaml
+results/
 # Environment variables
 .env
 # OS generated files

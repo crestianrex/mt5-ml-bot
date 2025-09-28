@@ -21,6 +21,10 @@ def fetch_bars(symbol: str, timeframe: str, count: int = 500) -> pd.DataFrame:
     Fetch `count` bars from MT5 for `symbol` and return a DataFrame with index=time (UTC).
     Returns an empty DataFrame on error or if no data.
     """
+    if count is None:
+        logger.debug(f"[{symbol}] `count` is None, fetching max history (36000 bars).")
+        count = 36000
+
     tf = TF_MAP.get(str(timeframe).upper())
     if tf is None:
         logger.warning(f"[{symbol}] Unknown timeframe '{timeframe}' — returning empty DataFrame.")
@@ -33,6 +37,7 @@ def fetch_bars(symbol: str, timeframe: str, count: int = 500) -> pd.DataFrame:
             return pd.DataFrame()
 
         df = pd.DataFrame(rates)
+        logger.info(f"[{symbol}] Fetched {len(df)} bars from MT5 for timeframe {timeframe}.")
         if "time" not in df.columns:
             logger.warning(f"[{symbol}] fetched data missing 'time' column — returning empty DataFrame")
             return pd.DataFrame()

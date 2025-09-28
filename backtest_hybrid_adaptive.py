@@ -3,6 +3,7 @@ from __future__ import annotations
 import pandas as pd
 from loguru import logger
 import os
+import datetime
 
 from src.config import Cfg
 from src.risk import RiskManager
@@ -22,7 +23,7 @@ CONTRACT_SIZE = 100000
 
 class SimPosition:
     """Simulated position for backtesting."""
-    def __init__(self, symbol, direction, lots, entry_price, sl, tp, entry_time, atr, entry_auc): # Added entry_auc
+    def __init__(self, symbol, direction, lots, entry_price, sl, tp, entry_time, atr, entry_auc, risk_fraction):
         self.symbol = symbol
         self.direction = direction
         self.lots = lots
@@ -35,7 +36,8 @@ class SimPosition:
         self.pnl = None
         self.atr = atr
         self.status = "open"
-        self.entry_auc = entry_auc # Added entry_auc
+        self.entry_auc = entry_auc
+        self.risk_fraction = risk_fraction
 
     def close(self, price, time, pnl):
         self.exit_price = price
@@ -45,6 +47,19 @@ class SimPosition:
 
 class HybridBacktester:
     """Adaptive hybrid backtester mirroring main_hybrid_adaptive.py logic."""
+    def _count_consecutive_losses_backtest(self) -> int:
+        closed_trades = sorted([p for p in self.positions if p.status == "closed" and p.pnl is not None], key=lambda p: p.exit_time)
+        if not closed_trades:
+            return 0
+        
+        count = 0
+        for trade in reversed(closed_trades):
+            if trade.pnl < 0:
+                count += 1
+            else:
+                break
+        return count
+
     def __init__(self, cfg: Cfg):
         self.logged_low_confidence = set()
         self.logged_skips = set()
@@ -53,7 +68,7 @@ class HybridBacktester:
         self.positions: list[SimPosition] = []
         self.equity_curve = []
         self.bar_counters = {sym: 0 for sym in cfg.symbols}
-        self.risks = {sym: RiskManager(cfg.risk) for sym in cfg.symbols}
+        self.risk_manager = RiskManager(cfg)
         
         logger.info(f"Initializing backtester with starting equity: {self.equity}")
         self.ens_per_symbol = {sym: load_ensemble(cfg, sym) for sym in cfg.symbols}
@@ -64,7 +79,7 @@ class HybridBacktester:
 
     def _manage_trailing_stops(self, sym: str, row: pd.Series, atr: float):
         """Simulated version of the live trailing stop logic."""
-        risk_cfg = self.risks[sym].cfg
+        risk_cfg = self.risk_manager.risk_cfg
         if not (risk_cfg.breakeven_at_1R or risk_cfg.trailing_atr_mult > 0):
             return # No trailing logic enabled
 
@@ -138,7 +153,7 @@ class HybridBacktester:
                 continue
 
             ens = self.ens_per_symbol[sym]
-            risk_mgr = self.risks[sym]
+            risk_mgr = self.risk_manager
 
             logger.info(f"Processing {len(data)} bars for {sym}...")
             for i in range(20, len(data)):
@@ -152,6 +167,30 @@ class HybridBacktester:
                 self._manage_trailing_stops(sym, current_row, atr)
                 self._update_positions(sym, current_row)
 
+                # --- Drawdown and Cooldown Check ---
+                risk_mgr._update_equity_peak(self.equity)
+                if risk_mgr._drawdown_exceeded(self.equity):
+                    if risk_mgr.cooldown_until is None: # Only trigger if not already in cooldown
+                        logger.warning(f"[{sym}] Drawdown threshold exceeded. Triggering cooldown.")
+                        now_utc = bar_time.to_pydatetime().replace(tzinfo=datetime.timezone.utc)
+                        risk_mgr._trigger_cooldown(now=now_utc)
+                
+                # --- Consecutive Loss Check ---
+                max_losses = getattr(risk_mgr.watchdog_cfg, "max_consecutive_losses", None)
+                if max_losses is not None and max_losses > 0:
+                    consecutive_losses = self._count_consecutive_losses_backtest()
+                    if consecutive_losses >= max_losses:
+                        if risk_mgr.cooldown_until is None:
+                            logger.warning(f"[{sym}] Watchdog: consecutive losses {consecutive_losses} >= threshold {max_losses}. Triggering cooldown.")
+                            now_utc = bar_time.to_pydatetime().replace(tzinfo=datetime.timezone.utc)
+                            risk_mgr._trigger_cooldown(now=now_utc)
+
+                now_utc = bar_time.to_pydatetime().replace(tzinfo=datetime.timezone.utc)
+                if risk_mgr.cooldown_active(now=now_utc):
+                    logger.info(f"[{sym}] Trading blocked: watchdog cooldown active.")
+                    self.equity_curve.append((bar_time, self.equity))
+                    continue
+
                 # Retrain if needed
                 if self.bar_counters[sym] > 0 and self.bar_counters[sym] % self.cfg.retrain_every_bars == 0:
                     window_size = min(self.cfg.history_bars, i + 1)
@@ -162,15 +201,15 @@ class HybridBacktester:
                     # Optimization: Explicitly select feature columns to avoid unnecessary copying
                     X_train_retrain = train_data[X.columns]
                     y_train_retrain = train_data["y"]
-                    ens.fit(X_train_retrain, y_train_retrain)
+                    ens.fit(X_train_retrain, y_train_retrain, prices=train_data["close"] if "close" in train_data.columns else None)
                     for name, auc in ens.member_cv_aucs_.items():
                         logger.info(f"[{sym}]   {name} CV AUC: {auc:.4f}")
                     save_ensemble(ens, sym)
 
                 # Check ensemble confidence before trading
-                if ens.ensemble_cv_auc_ is not None and ens.ensemble_cv_auc_ < risk_mgr.cfg.min_ensemble_auc:
+                if ens.ensemble_cv_auc_ is not None and ens.ensemble_cv_auc_ < risk_mgr.risk_cfg.min_ensemble_auc:
                     if sym not in self.logged_low_confidence:
-                        logger.info(f"[{sym}] Trading blocked due to low ensemble confidence (AUC={ens.ensemble_cv_auc_:.4f} < {risk_mgr.cfg.min_ensemble_auc:.4f}).")
+                        logger.info(f"[{sym}] Trading blocked due to low ensemble confidence (AUC={ens.ensemble_cv_auc_:.4f} < {risk_mgr.risk_cfg.min_ensemble_auc:.4f}).")
                         # Add the symbol to the set to prevent future logging for this instance
                         self.logged_low_confidence.add(sym)
                     self.equity_curve.append((bar_time, self.equity)) # Append current equity even if no trade
@@ -182,30 +221,42 @@ class HybridBacktester:
 
                 # Decide on new trades
                 prob_up = ens.predict_proba(last_features).iloc[0]
-                direction = "long" if prob_up >= risk_mgr.cfg.min_prob_long else "short" if (1 - prob_up) >= risk_mgr.cfg.min_prob_short else None
+
+                # Use optimized threshold if available, otherwise fallback to config
+                if ens.best_threshold_ is not None:
+                    threshold = ens.best_threshold_
+                    direction = "long" if prob_up >= threshold else "short"
+                else:
+                    direction = "long" if prob_up >= risk_mgr.risk_cfg.min_prob_long else "short" if (1 - prob_up) >= risk_mgr.risk_cfg.min_prob_short else None
 
                 if direction:
-                    # Check if a position is already open and if the message hasn't been logged yet
-                    if any(p.symbol == sym and p.status == "open" for p in self.positions) and sym not in self.logged_skips:
-                        logger.info(f"[{sym}] Skipping new trade; existing position is open.")
-                        # Add the symbol to the set so the message won't be logged again
-                        self.logged_skips.add(sym)
-                    else:
-                        # If the position is closed, remove the symbol from the set to allow a new log message later
-                        if sym in self.logged_skips and not any(p.symbol == sym and p.status == "open" for p in self.positions):
-                            self.logged_skips.remove(sym)
+                    # --- Accurately Simulate Portfolio Risk ---
+                    total_open_risk = sum(p.risk_fraction for p in self.positions if p.status == "open")
 
-                        lots = risk_mgr.position_size(self.equity, atr, 10.0, PIP_SIZE_ASSUMPTION, ens.ensemble_cv_auc_)
-                        if lots > 0:
-                            price = current_row["close"]
-                            sl, tp = risk_mgr.stop_targets(price, atr, direction, ens.ensemble_cv_auc_)
-                            # Store the ATR at time of trade for breakeven calculations
-                            pos = SimPosition(sym, direction, lots, price, sl, tp, bar_time, atr, ens.ensemble_cv_auc_)
-                            self.positions.append(pos)
-                            logger.info(
-                                f"[{sym}] Opened {direction} position at {price:.5f}. "
-                                f"Lots: {lots:.2f}, SL: {sl:.5f}, TP: {tp:.5f}, AUC: {ens.ensemble_cv_auc_:.4f}"
-                            )
+                    # Manually calculate effective_risk to avoid changing shared function signatures
+                    risk_per_trade = risk_mgr._get_dynamic_value(
+                        risk_mgr.risk_cfg.dynamic_risk, ens.ensemble_cv_auc_, getattr(risk_mgr.risk_cfg, "risk_per_trade", 0.005)
+                    )
+                    max_risk_allowed = max(0.0, float(risk_mgr.risk_cfg.max_portfolio_risk) - float(total_open_risk))
+                    effective_risk = min(risk_per_trade, max_risk_allowed)
+                    
+                    lots = risk_mgr.position_size(
+                        self.equity, atr, 10.0, PIP_SIZE_ASSUMPTION, ens.ensemble_cv_auc_, total_open_risk
+                    )
+
+                    if lots > 0:
+                        price = current_row["close"]
+                        sl, tp = risk_mgr.stop_targets(price, atr, direction, ens.ensemble_cv_auc_, sym)
+                        pos = SimPosition(
+                            sym, direction, lots, price, sl, tp, bar_time, atr, ens.ensemble_cv_auc_, effective_risk
+                        )
+                        self.positions.append(pos)
+                        logger.info(
+                            f"[{sym}] Opened {direction} position at {price:.5f}. "
+                            f"Lots: {lots:.2f}, SL: {sl:.5f}, TP: {tp:.5f}, AUC: {ens.ensemble_cv_auc_:.4f}, Risk: {effective_risk:.4f}"
+                        )
+                    else:
+                        logger.info(f"[{sym}] Trade skipped due to risk limits or position size zero.")
                 else:
                     logger.info(f"[{sym}] No trade signal. Probs: (Up: {prob_up:.3f}, Down: {1-prob_up:.3f})")
 
