@@ -1,4 +1,4 @@
-# fetch_historical_data.py
+# fetcher.py
 import MetaTrader5 as mt5 # type: ignore
 import pandas as pd
 import os

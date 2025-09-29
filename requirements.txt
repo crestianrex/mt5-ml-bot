@@ -11,3 +11,4 @@ python-dotenv>=1.0
 # MetaTrader5>=5.0 this would failed in ubuntu
 loguru>=0.7
 optuna>=3.6
+quantstats>=0.0.62

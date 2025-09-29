@@ -1,4 +1,4 @@
-# optuna_tuner.py
+# tuner.py
 from __future__ import annotations
 import os
 import pickle
@@ -58,7 +58,7 @@ def objective(trial, df: pd.DataFrame, y: pd.Series, static_features: pd.DataFra
         feature_params_raw = suggest_params(trial, "feature", yaml_cfg.get("features", {}))
 
         roc_lags_options = yaml_cfg.get("roc_lags_options", [
-            [1, 3, 5, 10], [1, 2, 4, 8], [2, 5, 10, 15], [1, 2, 3]
+            (1, 3, 5, 10), (1, 2, 4, 8), (2, 5, 10, 15), (1, 2, 3)
         ])
 
         if "roc_lags" in feature_params_raw:

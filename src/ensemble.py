@@ -212,12 +212,12 @@ class Ensemble:
                 pickle.dump(self._meta_calibrator, f)
 
     @classmethod
-    def load(cls, path: str, cfg) -> "Ensemble":
+    def load(cls, path: str, cfg, model_params: Optional[Dict[str, Dict]] = None) -> "Ensemble":
         """Loads an entire ensemble from a directory."""
         logger.info(f"Loading ensemble from {path}")
         
         # Create a new ensemble instance to populate
-        ensemble = cls(cfg)
+        ensemble = cls(cfg, model_params=model_params)
 
         # Load each member
         for name, member in ensemble.members.items():

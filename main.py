@@ -1,4 +1,4 @@
-# main_hybrid_adaptive.py
+# main.py
 import os
 import time
 import copy
@@ -10,7 +10,7 @@ import MetaTrader5 as mt5  # type: ignore
 from src.mt5_client import MT5Client
 from src.risk import RiskManager
 from src.execution import Execution
-from src.utils import setup_logging, get_training_data, load_ensemble, save_ensemble
+from src.utils import setup_logging, get_training_data, load_ensemble, save_ensemble, safe_retrain_ensemble
 
 # --- Initial Setup ---
 load_dotenv()
@@ -116,18 +116,12 @@ def run(dry_run: bool = False):
                     if bar_counters[sym] % cfg.retrain_every_bars == 0:
                         logger.info(f"[{sym}] Starting safe retraining...")
                         full_data, full_X, full_y = get_training_data(cfg, sym, source=cfg.data_source)
-                        ens_copy = copy.deepcopy(ens_per_symbol[sym])
-                        try:
-                            ens_copy.fit(full_X, full_y, prices=full_data["close"] if "close" in full_data.columns else None)
-                            auc_new = getattr(ens_copy, "ensemble_cv_auc_", getattr(ens_copy, "cv_auc_", 0))
-                            if auc_new >= cfg.risk.min_ensemble_auc:
-                                ens_per_symbol[sym] = ens_copy
-                                save_ensemble(ens_copy, sym)
-                                logger.info(f"[{sym}] Retraining successful, AUC={auc_new:.3f}")
-                            else:
-                                logger.warning(f"[{sym}] Retraining skipped: AUC={auc_new:.3f} below min {cfg.risk.min_ensemble_auc}")
-                        except Exception as e:
-                            logger.exception(f"[{sym}] Retraining failed: {e}")
+                        
+                        ens_old = ens_per_symbol[sym]
+                        ens_new = safe_retrain_ensemble(cfg, sym, ens_old, full_X, full_y, full_data["close"] if "close" in full_data.columns else None, dry_run=dry_run)
+                        
+                        # Update the ensemble in the main bot's state
+                        ens_per_symbol[sym] = ens_new
 
                     # --- Manage existing trades first ---
                     try:

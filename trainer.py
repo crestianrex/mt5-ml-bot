@@ -1,4 +1,4 @@
-# train_adaptive.py
+# trainer.py
 """
 Adaptive retraining module. Intended to be run periodically or from the main loop.
 Performs safe retraining with no lookahead. On failure, keeps the previous ensemble.
@@ -14,12 +14,11 @@ from datetime import datetime, timezone
 from typing import Optional
 
 from src.config import Cfg
-from src.utils import get_training_data, load_ensemble, save_ensemble
+from src.utils import get_training_data, load_ensemble, save_ensemble, safe_retrain_ensemble
 from src.ensemble import Ensemble
 
 # Safe retraining parameters
 MIN_SAMPLES_TO_RETRAIN = 400  # don't retrain if less than this many samples
-MIN_AUC_IMPROVEMENT = 0.005  # require this improvement to accept new model
 
 def retrain_symbol(cfg: Cfg, symbol: str, dry_run: bool = True) -> dict:
     """
@@ -44,44 +43,20 @@ def retrain_symbol(cfg: Cfg, symbol: str, dry_run: bool = True) -> dict:
         logger.warning(msg)
         return {"ok": False, "reason": msg}
 
-    # backup current ensemble
-    ens_backup = copy.deepcopy(ens_old)
+    # Use the shared safe_retrain_ensemble function
+    ens_new = safe_retrain_ensemble(cfg, symbol, ens_old, X, y, data["close"] if "close" in data.columns else None, dry_run=dry_run)
 
-    try:
-        ens_new = copy.deepcopy(ens_old)
-        # Fit on all historical data
-        ens_new.fit(X, y, prices=data["close"] if "close" in data.columns else None)
+    # Check if the ensemble was updated (i.e., if ens_new is different from ens_old)
+    if ens_new is ens_old:
+        # Retrain was not accepted or failed
         new_auc = getattr(ens_new, "ensemble_cv_auc_", getattr(ens_new, "cv_auc_", None))
         old_auc = getattr(ens_old, "ensemble_cv_auc_", getattr(ens_old, "cv_auc_", None))
-        logger.info(f"[{symbol}] old_auc={old_auc} new_auc={new_auc}")
-
-        if new_auc is None:
-            logger.warning(f"[{symbol}] New ensemble reports no AUC; refusing to replace.")
-            return {"ok": False, "reason": "no_new_auc"}
-
-        if old_auc is None:
-            accept = True
-        else:
-            # accept only if improved by threshold
-            accept = (new_auc - old_auc) >= MIN_AUC_IMPROVEMENT
-
-        if accept:
-            if not dry_run:
-                save_ensemble(ens_new, symbol)
-            logger.info(f"[{symbol}] Retrain accepted. old_auc={old_auc} new_auc={new_auc}")
-            return {"ok": True, "old_auc": old_auc, "new_auc": new_auc}
-        else:
-            logger.info(f"[{symbol}] Retrain NOT accepted. improvement {(new_auc-old_auc):.4f} < {MIN_AUC_IMPROVEMENT}")
-            return {"ok": False, "reason": "insufficient_improvement", "old_auc": old_auc, "new_auc": new_auc}
-
-    except Exception as e:
-        logger.exception(f"[{symbol}] Retrain failed: {e}")
-        # restore backup if needed
-        try:
-            save_ensemble(ens_backup, symbol)
-        except Exception:
-            pass
-        return {"ok": False, "reason": "exception", "err": str(e)}
+        return {"ok": False, "reason": "insufficient_improvement_or_failed", "old_auc": old_auc, "new_auc": new_auc}
+    else:
+        # Retrain was accepted
+        new_auc = getattr(ens_new, "ensemble_cv_auc_", getattr(ens_new, "cv_auc_", None))
+        old_auc = getattr(ens_old, "ensemble_cv_auc_", getattr(ens_old, "cv_auc_", None))
+        return {"ok": True, "old_auc": old_auc, "new_auc": new_auc}
 
 
 def retrain_all(cfg: Cfg, symbols: list[str], dry_run: bool = True) -> dict:

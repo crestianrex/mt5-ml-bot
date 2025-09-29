@@ -36,6 +36,8 @@ class RiskCfg:
     transaction_cost_pips: float = 1.5
     session_filter: Optional[Dict[str, str]] = None
     min_ensemble_auc: float = 0.55
+    min_auc_improvement: float = 0.005
+    max_drawdown_for_pruning: float = 0.70 # New: Max drawdown allowed before Optuna trial pruning
     dynamic_risk: Dict[str, Any] = field(
         default_factory=lambda: {
             "enabled": True,
@@ -73,6 +75,8 @@ class Cfg:
     use_gpu: bool = False
     cv_samples_per_split: int = 300
     optuna_n_trials: int = 150
+    optuna_pruning_interval: int = 100 # New: Interval for Optuna pruning checks
+    n_jobs: int = -1 # Number of parallel jobs for tuning. -1 means all available CPU cores.
     features: FeatureCfg = field(default_factory=FeatureCfg)
     models: List[Dict[str, Any]] = field(default_factory=list)
     ensemble: Dict[str, Any] = field(default_factory=dict)
@@ -98,6 +102,15 @@ class Cfg:
                 return int(value * 86400)
         except Exception:
             logger.warning(f"Cfg: invalid timeframe format '{self.timeframe}'")
+        return None
+
+    def timeframe_minutes(self) -> Optional[int]:
+        """ Convert timeframe string like 'M5', 'H1', 'D1' to minutes.
+        Returns None for unknown formats.
+        """
+        seconds = self.timeframe_seconds()
+        if seconds is not None:
+            return seconds // 60
         return None
 
     @staticmethod
@@ -144,6 +157,8 @@ class Cfg:
             use_gpu=bool(raw.get("use_gpu", False)),
             cv_samples_per_split=int(raw.get("cv_samples_per_split", 300)),
             optuna_n_trials=int(raw.get("optuna_n_trials", 100)),
+            optuna_pruning_interval=int(raw.get("optuna_pruning_interval", 100)), # New
+            n_jobs=int(raw.get("n_jobs", -1)), # New
             features=features_obj,
             models=raw.get("models", []),
             ensemble=raw.get("ensemble", {}),

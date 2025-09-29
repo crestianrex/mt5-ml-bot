@@ -3,6 +3,7 @@ from __future__ import annotations
 import os
 import pickle
 import sys
+import copy
 from loguru import logger
 import pandas as pd
 from src.config import Cfg, FeatureCfg
@@ -92,16 +93,17 @@ def get_training_data(cfg: Cfg, symbol: str, count: int | None = None, source: s
 def load_ensemble(cfg: Cfg, symbol: str) -> Ensemble:
     # New: ensemble is saved in a directory, not a single file
     model_dir_path = os.path.join(MODEL_DIR, f"{symbol.replace('#','')}_ensemble")
+    model_params = load_optuna_params(symbol)
+
     if os.path.isdir(model_dir_path):
         logger.info(f"[{symbol}] Loading saved ensemble from directory {model_dir_path}")
         try:
             # Use the new class method to load
-            return Ensemble.load(model_dir_path, cfg)
+            return Ensemble.load(model_dir_path, cfg, model_params=model_params)
         except Exception as e:
             logger.exception(f"[{symbol}] Failed to load ensemble from directory: {e}; creating a new one.")
 
     logger.info(f"[{symbol}] No saved ensemble directory found. Creating a new one.")
-    model_params = load_optuna_params(symbol)
     ens = Ensemble(cfg, model_params=model_params)
     return ens
 
@@ -114,3 +116,44 @@ def save_ensemble(ensemble: Ensemble, symbol: str):
         logger.info(f"[{symbol}] Ensemble model saved to directory {model_dir_path}")
     except Exception as e:
         logger.error(f"[{symbol}] Failed to save ensemble: {e}")
+
+def safe_retrain_ensemble(cfg: Cfg, symbol: str, ens_old: Ensemble, X_train: pd.DataFrame, y_train: pd.Series, prices: pd.Series, dry_run: bool = False) -> Ensemble:
+    """
+    Safely retrains an ensemble model.
+
+    Args:
+        cfg: The configuration object.
+        symbol: The symbol being trained.
+        ens_old: The existing ensemble model.
+        X_train: The training features.
+        y_train: The training labels.
+        prices: The close prices for the training period.
+        dry_run: If True, the new model will not be saved.
+
+    Returns:
+        The retrained ensemble if it's better than the old one, otherwise the old ensemble.
+    """
+    logger.info(f"[{symbol}] Starting safe retraining...")
+    
+    ens_new = copy.deepcopy(ens_old)
+
+    try:
+        ens_new.fit(X_train, y_train, prices=prices)
+        new_auc = getattr(ens_new, "ensemble_cv_auc_", getattr(ens_new, "cv_auc_", None))
+        old_auc = getattr(ens_old, "ensemble_cv_auc_", getattr(ens_old, "cv_auc_", None))
+
+        if new_auc is None:
+            logger.warning(f"[{symbol}] New ensemble reports no AUC; refusing to replace.")
+            return ens_old
+
+        if old_auc is None or (new_auc - old_auc) >= cfg.risk.min_auc_improvement:
+            if not dry_run:
+                save_ensemble(ens_new, symbol)
+            logger.info(f"[{symbol}] Retrain accepted. old_auc={old_auc} new_auc={new_auc}")
+            return ens_new
+        else:
+            logger.info(f"[{symbol}] Retrain NOT accepted. improvement {(new_auc - old_auc):.4f} < {cfg.risk.min_auc_improvement}")
+            return ens_old
+    except Exception as e:
+        logger.exception(f"[{symbol}] Retraining failed: {e}")
+        return ens_old

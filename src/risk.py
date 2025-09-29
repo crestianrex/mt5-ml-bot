@@ -95,7 +95,7 @@ class RiskManager:
             return False
         dd = 1.0 - (equity_value / self.equity_peak) if self.equity_peak else 0.0
         if dd >= getattr(self.risk_cfg, "block_on_drawdown", 0.10):
-            logger.warning(f"Drawdown threshold exceeded: drawdown={dd:.4f} >= {self.risk_cfg.block_on_drawdown}")
+            logger.warning(f"Drawdown threshold exceeded: equity={equity_value:.2f}, peak={self.equity_peak:.2f}, drawdown={dd:.4f} >= {self.risk_cfg.block_on_drawdown}")
             return True
         return False
 

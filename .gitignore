@@ -19,6 +19,7 @@ data/
 logs/
 models/
 optuna_params/
+optuna_results/
 results/
 # Environment variables
 .env
