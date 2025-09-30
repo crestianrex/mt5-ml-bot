@@ -12,7 +12,7 @@ import traceback # Added for detailed error logging
 
 from src.config import Cfg
 from src.data_colab import fetch_bars, merge_features_labels
-from src.features import build_static_features, build_dynamic_features, FeatureConfig
+from src.features import build_static_features, build_dynamic_features, FeatureConfig, add_contextual_features
 from src.labels import binary_up_down
 from src.ensemble import Ensemble
 from sklearn.model_selection import TimeSeriesSplit
@@ -117,13 +117,35 @@ def objective(trial, df: pd.DataFrame, y: pd.Series, static_features: pd.DataFra
 def run_tuning_for_symbol(sym: str):
     logger.info(f"🔹 Starting combined feature and model tuning for {sym}...")
 
-    logger.info(f"Fetching data for {sym}...")
+    # --- 1. Fetch all required dataframes ---
+    logger.info(f"Fetching primary data for {sym} on {cfg.timeframe}...")
     df = fetch_bars(sym, cfg.timeframe, cfg.history_bars)
+
+    mta_df = None
+    if cfg.context_features.mta.enabled:
+        logger.info(f"Fetching MTA data for {sym} on {cfg.context_features.mta.timeframe}...")
+        mta_df = fetch_bars(sym, cfg.context_features.mta.timeframe, cfg.history_bars)
+
+    inter_market_df = None
+    if cfg.context_features.inter_market.enabled:
+        im_sym = cfg.context_features.inter_market.symbol
+        logger.info(f"Fetching Inter-Market data for {im_sym} on {cfg.timeframe}...")
+        inter_market_df = fetch_bars(im_sym, cfg.timeframe, cfg.history_bars)
+
+    # --- 2. Add contextual features ---
+    df = add_contextual_features(
+        df, 
+        mta_df=mta_df, 
+        inter_market_df=inter_market_df, 
+        mta_cfg=cfg.context_features.mta, 
+        im_cfg=cfg.context_features.inter_market
+    )
+
+    # --- 3. Create labels and pre-calculate static features ---
     y = binary_up_down(df, cfg.prediction_horizon)
+    static_features = build_static_features(df, symbol=sym, pa_cfg=cfg.context_features.price_action)
     
-    # --- Pre-calculate and cache static features ---
-    static_features = build_static_features(df, symbol=sym)
-    
+    # --- 4. Run Optuna Study ---
     objective_partial = partial(objective, df=df, y=y, static_features=static_features, symbol=sym)
 
     study_name = f"feature_model_tuning_{sym.replace('#','_')}_history_{cfg.history_bars}"
@@ -135,7 +157,7 @@ def run_tuning_for_symbol(sym: str):
     n_trials = yaml_cfg.get("optuna_n_trials", 100)
     study.optimize(objective_partial, n_trials=n_trials)
 
-    # --- Process and Save Best Parameters ---
+    # --- 5. Process and Save Best Parameters ---
     best_params_flat = study.best_params
     best_params_structured = {"features": {}, "models": {}}
 
@@ -158,7 +180,7 @@ def run_tuning_for_symbol(sym: str):
     logger.info(f"[{sym}] Best combined params saved to {param_file}")
     logger.debug(best_params_structured)
     
-    # --- Generate and Save Visualization Plots ---
+    # --- 6. Generate and Save Visualization Plots ---
     try:
         fig = optuna.visualization.plot_optimization_history(study)
         fig.write_image(os.path.join(PARAMS_DIR, f"{study_name}_optimization_history.png"))

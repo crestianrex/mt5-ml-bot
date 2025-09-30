@@ -8,6 +8,31 @@ import logging
 logger = logging.getLogger(__name__)
 
 @dataclass
+class MtaCfg:
+    enabled: bool = True
+    timeframe: str = "H1"
+    ema_period: int = 50
+    rsi_period: int = 14
+
+@dataclass
+class InterMarketCfg:
+    enabled: bool = True
+    symbol: str = "DXY"
+    roc_lags: List[int] = field(default_factory=lambda: [5, 21])
+
+@dataclass
+class PriceActionCfg:
+    enabled: bool = True
+    home_base_ma_period: int = 200
+    swing_lookback: int = 50
+
+@dataclass
+class ContextFeaturesCfg:
+    mta: MtaCfg = field(default_factory=MtaCfg)
+    inter_market: InterMarketCfg = field(default_factory=InterMarketCfg)
+    price_action: PriceActionCfg = field(default_factory=PriceActionCfg)
+
+@dataclass
 class FeatureCfg:
     rsi_period: int = 14
     ema_fast: int = 12
@@ -78,6 +103,7 @@ class Cfg:
     optuna_pruning_interval: int = 100 # New: Interval for Optuna pruning checks
     n_jobs: int = -1 # Number of parallel jobs for tuning. -1 means all available CPU cores.
     features: FeatureCfg = field(default_factory=FeatureCfg)
+    context_features: ContextFeaturesCfg = field(default_factory=ContextFeaturesCfg)
     models: List[Dict[str, Any]] = field(default_factory=list)
     ensemble: Dict[str, Any] = field(default_factory=dict)
     risk: RiskCfg = field(default_factory=RiskCfg)
@@ -133,6 +159,21 @@ class Cfg:
             logger.warning(f"Invalid feature config in YAML: {e}; using defaults.")
             features_obj = FeatureCfg()
 
+        # Parse context features
+        raw_context = raw.get("context_features", {}) or {}
+        try:
+            mta_cfg = MtaCfg(**(raw_context.get("mta", {})))
+            inter_market_cfg = InterMarketCfg(**(raw_context.get("inter_market", {})))
+            price_action_cfg = PriceActionCfg(**(raw_context.get("price_action", {})))
+            context_features_obj = ContextFeaturesCfg(
+                mta=mta_cfg,
+                inter_market=inter_market_cfg,
+                price_action=price_action_cfg
+            )
+        except Exception as e:
+            logger.warning(f"Invalid context_features config in YAML: {e}; using defaults.")
+            context_features_obj = ContextFeaturesCfg()
+
         try:
             risk_obj = RiskCfg(**(raw.get("risk", {}) or {}))
         except Exception as e:
@@ -160,6 +201,7 @@ class Cfg:
             optuna_pruning_interval=int(raw.get("optuna_pruning_interval", 100)), # New
             n_jobs=int(raw.get("n_jobs", -1)), # New
             features=features_obj,
+            context_features=context_features_obj,
             models=raw.get("models", []),
             ensemble=raw.get("ensemble", {}),
             risk=risk_obj,

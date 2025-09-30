@@ -17,7 +17,38 @@ class FeatureConfig:
         self.adx_trend_thresh = adx_trend_thresh
         self.timeframe_minutes = timeframe_minutes
 
-def build_static_features(df: pd.DataFrame, symbol: str = None) -> pd.DataFrame:
+def add_contextual_features(df: pd.DataFrame, mta_df: pd.DataFrame = None, inter_market_df: pd.DataFrame = None, mta_cfg: "MtaCfg" = None, im_cfg: "InterMarketCfg" = None) -> pd.DataFrame:
+    """
+    Adds contextual features from higher timeframes (MTA) and other markets.
+    """
+    if mta_df is not None and mta_cfg and mta_cfg.enabled:
+        logger.debug(f"Adding MTA features from timeframe {mta_cfg.timeframe}...")
+        # Calculate indicators on MTA dataframe
+        mta_ema = ta.trend.ema_indicator(mta_df["close"], window=mta_cfg.ema_period)
+        mta_rsi = ta.momentum.rsi(mta_df["close"], window=mta_cfg.rsi_period)
+
+        # Create a dataframe for these features
+        mta_features = pd.DataFrame(index=mta_df.index)
+        mta_features[f'mta_ema_{mta_cfg.ema_period}'] = mta_ema
+        mta_features[f'mta_rsi_{mta_cfg.rsi_period}'] = mta_rsi
+
+        # Align with the primary dataframe
+        df = pd.merge(df, mta_features, left_index=True, right_index=True, how='left')
+        df.ffill(inplace=True)
+
+    if inter_market_df is not None and im_cfg and im_cfg.enabled:
+        logger.debug(f"Adding Inter-Market features from symbol {im_cfg.symbol}...")
+        im_features = pd.DataFrame(index=inter_market_df.index)
+        for lag in im_cfg.roc_lags:
+            im_features[f'im_{im_cfg.symbol}_roc_{lag}'] = inter_market_df["close"].pct_change(lag)
+
+        # Align with the primary dataframe
+        df = pd.merge(df, im_features, left_index=True, right_index=True, how='left')
+        df.ffill(inplace=True)
+
+    return df
+
+def build_static_features(df: pd.DataFrame, symbol: str = None, pa_cfg: "PriceActionCfg" = None) -> pd.DataFrame:
     """
     Builds features that do not depend on tunable hyperparameters.
     These can be calculated once and cached.
@@ -58,7 +89,24 @@ def build_static_features(df: pd.DataFrame, symbol: str = None) -> pd.DataFrame:
     X["hour_cos"] = np.cos(2 * np.pi * df.index.hour / 24)
     X["dow_sin"] = np.sin(2 * np.pi * df.index.dayofweek / 7)
     X["dow_cos"] = np.cos(2 * np.pi * df.index.dayofweek / 7)
-    
+
+    # --- Advanced Price Action Features ---
+    if pa_cfg and pa_cfg.enabled:
+        # Distance from 'Home Base' MA
+        home_base_ma = ta.trend.ema_indicator(df["close"], window=pa_cfg.home_base_ma_period)
+        X[f'dist_from_ema_{pa_cfg.home_base_ma_period}'] = (df["close"] - home_base_ma) / home_base_ma
+
+        # Time since N-bar high/low
+        rolling_high = df["high"].rolling(window=pa_cfg.swing_lookback).max()
+        rolling_low = df["low"].rolling(window=pa_cfg.swing_lookback).min()
+        
+        is_new_high = df["high"] == rolling_high
+        is_new_low = df["low"] == rolling_low
+
+        # Cumulatively count bars since the last event
+        X['bars_since_high'] = is_new_high.cumsum().groupby((is_new_high).cumsum()).cumcount()
+        X['bars_since_low'] = is_new_low.cumsum().groupby((is_new_low).cumsum()).cumcount()
+
     return X
 
 def build_dynamic_features(df: pd.DataFrame, static_features: pd.DataFrame, cfg: FeatureConfig, symbol: str = None) -> pd.DataFrame:
