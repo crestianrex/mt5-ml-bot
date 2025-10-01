@@ -17,10 +17,13 @@ os.makedirs(PARAMS_DIR, exist_ok=True)
 
 def setup_logging(level="INFO", to_file=True, rotate="10 MB", retention="7 days"):
     logger.remove()
-    logger.add(sys.stderr, level=level)
+    # Use enqueue=True to make logging from multiple processes safe for shared sinks (stderr and the log file).
+    # This will prevent messages from being garbled, but they will still be mixed.
+    # The log messages themselves should contain context like the symbol name.
+    logger.add(sys.stderr, level=level, enqueue=True)
     if to_file:
         os.makedirs("logs", exist_ok=True)
-        logger.add("logs/bot.log", level=level, rotation=rotate, retention=retention)
+        logger.add("logs/bot.log", level=level, rotation=rotate, retention=retention, enqueue=True)
 
 def load_optuna_params(symbol: str) -> dict | None:
     # symbol names in params are saved without '#'

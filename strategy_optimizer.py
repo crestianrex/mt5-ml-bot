@@ -2,16 +2,14 @@
 import optuna
 import pandas as pd
 import numpy as np
-import logging
+from loguru import logger
 import os
 import json
 import copy # Import copy module for deepcopy
 from sklearn.metrics import roc_auc_score
 from backtester import HybridBacktester
 from src.config import Cfg, RiskCfg # Import Cfg and RiskCfg
-
-# --- Setup Logging ---
-logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
+from src.utils import setup_logging
 
 # --- Load Configuration ---
 # Load the base Cfg object once
@@ -34,7 +32,7 @@ def run_backtest_for_trial(trial: optuna.Trial, params):
     trial_cfg_obj = copy.deepcopy(base_cfg_obj)
     
     # --- Temporarily disable safety features for pure optimization ---
-    logging.info("Temporarily disabling safety features (drawdown blocks, watchdog) for this optimization trial.")
+    logger.info("Temporarily disabling safety features (drawdown blocks, watchdog) for this optimization trial.")
     trial_cfg_obj.risk.block_on_drawdown = 1.0  # Set to 100% to effectively disable
     if hasattr(trial_cfg_obj, 'watchdog'):
         trial_cfg_obj.watchdog.max_consecutive_losses = 0  # Set to 0 to disable
@@ -71,7 +69,7 @@ def run_backtest_for_trial(trial: optuna.Trial, params):
         annualization_factor = np.sqrt(252 * (24 * 60 / timeframe_minutes))
     sharpe_ratio = returns.mean() / returns.std() * annualization_factor if returns.std() != 0 else 0.0
     
-    logging.info(f"Trial completed. Sharpe Ratio: {sharpe_ratio:.4f}")
+    logger.info(f"Trial completed. Sharpe Ratio: {sharpe_ratio:.4f}")
     return sharpe_ratio
 
 def objective(trial: optuna.Trial):
@@ -91,7 +89,7 @@ def objective(trial: optuna.Trial):
     try:
         return run_backtest_for_trial(trial, params)
     except Exception as e:
-        logging.error(f"An error occurred during trial {trial.number}: {e}")
+        logger.error(f"An error occurred during trial {trial.number}: {e}")
         # Prune the trial by returning a very low value
         return -1.0
 
@@ -99,8 +97,9 @@ def main():
     """
     Main function to run the Optuna study.
     """
-    logging.info(f"Starting Optuna study '{STUDY_NAME}' with {N_TRIALS} trials.")
-    logging.info(f"Storage: {STORAGE_PATH}")
+    setup_logging()
+    logger.info(f"Starting Optuna study '{STUDY_NAME}' with {N_TRIALS} trials.")
+    logger.info(f"Storage: {STORAGE_PATH}")
     
     study = optuna.create_study(
         study_name=STUDY_NAME,
@@ -116,13 +115,13 @@ def main():
     
     study.optimize(objective, n_trials=N_TRIALS, n_jobs=base_cfg_obj.n_jobs)
     
-    logging.info("Optimization finished.")
-    logging.info(f"Best trial number: {study.best_trial.number}")
-    logging.info("Best parameters:")
+    logger.info("Optimization finished.")
+    logger.info(f"Best trial number: {study.best_trial.number}")
+    logger.info("Best parameters:")
     best_params = study.best_params
     for key, value in best_params.items():
-        logging.info(f"  {key}: {value}")
-    logging.info(f"Best value (Sharpe Ratio): {study.best_value:.4f}")
+        logger.info(f"  {key}: {value}")
+    logger.info(f"Best value (Sharpe Ratio): {study.best_value:.4f}")
 
     # Save the best parameters to a JSON file
     try:
@@ -130,9 +129,9 @@ def main():
         os.makedirs(PARAMS_OUTPUT_DIR, exist_ok=True)
         with open(PARAMS_OUTPUT_FILE, 'w') as f:
             json.dump(best_params, f, indent=4)
-        logging.info(f"Successfully saved best parameters to {PARAMS_OUTPUT_FILE}")
+        logger.info(f"Successfully saved best parameters to {PARAMS_OUTPUT_FILE}")
     except IOError as e:
-        logging.error(f"Failed to save parameters to {PARAMS_OUTPUT_FILE}: {e}")
+        logger.error(f"Failed to save parameters to {PARAMS_OUTPUT_FILE}: {e}")
 
 if __name__ == "__main__":
     main()

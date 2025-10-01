@@ -162,7 +162,7 @@ class HybridBacktester:
             
         #     # Use the shared safe_retrain_ensemble function
         #     # IMPORTANT: A dry_run=True flag should be added here to prevent overwriting prod models.
-        #     ens_new = safe_retrain_ensemble(self.cfg, sym, ens_old, train_data[X.columns], train_data["y"], train_data["close"] if "close" in train_data.columns else None)
+        #     ens_new = safe_retrain_ensemble(self.cfg, sym, ens_old, train_data[X.columns], train_data["y"], train_data["close"] if "close" in train_data.columns else None, dry_run=True)
             
         #     # Update the ensemble in the backtester's state
         #     self.ens_per_symbol[sym] = ens_new
@@ -290,7 +290,7 @@ class HybridBacktester:
             self.equity_curve.append((bar_time, self.equity))
 
             # --- Direct Drawdown Pruning Check ---
-            current_drawdown = 1.0 - (self.equity / self.initial_equity)
+            current_drawdown = 1.0 - (self.equity / self.risk_manager.peak_equity)
             if trial and current_drawdown >= self.cfg.risk.max_drawdown_for_pruning:
                 logger.warning(f"[{sym}] Trial {trial.number} pruned due to excessive drawdown: {current_drawdown:.2%} >= {self.cfg.risk.max_drawdown_for_pruning:.2%}")
                 raise optuna.TrialPruned()
