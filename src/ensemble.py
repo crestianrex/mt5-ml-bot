@@ -66,6 +66,45 @@ def custom_pnl(
     logger.debug(f"custom_pnl: total={total:.6f}, trades={len(pnl)}")
     return total
 
+def calculate_sharpe_ratio(
+    y_true: pd.Series,
+    y_pred: pd.Series,
+    prices: pd.Series,
+    cfg: "Cfg",
+    **trading_costs
+) -> float:
+    """Calculates annualized Sharpe ratio for a given set of predictions."""
+    if prices is None or len(prices) != len(y_pred):
+        raise ValueError(f"Prices and predictions must be same length: {len(prices)} vs {len(y_pred)}")
+
+    pnl = []
+    spread = trading_costs.get("spread_pips", 2.0) * trading_costs.get("pip_value", 0.0001)
+
+    # Simulate PnL per bar, assuming a position is held for one bar
+    for i in range(1, len(prices)):
+        if y_pred.iloc[i-1] == 1: # Long signal
+            pnl.append(prices.iloc[i] - prices.iloc[i-1] - spread)
+        elif y_pred.iloc[i-1] == 0: # Short signal
+            pnl.append(prices.iloc[i-1] - prices.iloc[i] - spread)
+        else: # No signal
+            pnl.append(0)
+
+    returns = pd.Series(pnl)
+    if returns.std() == 0 or returns.empty:
+        return 0.0
+
+    # Annualize Sharpe Ratio
+    timeframe_minutes = cfg.timeframe_minutes()
+    if timeframe_minutes is None:
+        annualization_factor = 1.0 # Cannot determine timeframe, return raw Sharpe
+    else:
+        bars_per_year = 252 * (24 * 60 / timeframe_minutes) # 252 trading days
+        annualization_factor = np.sqrt(bars_per_year)
+
+    sharpe = (returns.mean() / returns.std()) * annualization_factor
+    logger.debug(f"sharpe_ratio: calculated={sharpe:.4f}, returns={len(returns)}")
+    return sharpe if np.isfinite(sharpe) else 0.0
+
 
 class DynamicWeightedEnsemble:
     def __init__(self, base_models: Dict[str, MLStrategy], decay: float = 0.9, min_weight: float = 0.05):
@@ -444,6 +483,12 @@ class Ensemble:
                     score = custom_pnl(y_true, preds, prices, **self.trading_costs)
                 except Exception as e:
                     logger.warning(f"Threshold evaluation custom_pnl failed at thr={thr}: {e}")
+                    continue
+            elif self.threshold_metric == "sharpe_ratio":
+                try:
+                    score = calculate_sharpe_ratio(y_true, preds, prices, self.cfg, **self.trading_costs)
+                except Exception as e:
+                    logger.warning(f"Threshold evaluation sharpe_ratio failed at thr={thr}: {e}")
                     continue
             else:
                 score = f1_score(y_true, preds)

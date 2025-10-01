@@ -12,8 +12,7 @@ import traceback # Added for detailed error logging
 
 from src.config import Cfg
 from src.data_colab import fetch_bars, merge_features_labels
-from src.features import build_static_features, build_dynamic_features, FeatureConfig, add_contextual_features
-from src.labels import binary_up_down
+from src.utils import get_training_data
 from src.ensemble import Ensemble
 from sklearn.model_selection import TimeSeriesSplit
 from sklearn.metrics import roc_auc_score
@@ -67,7 +66,7 @@ def objective(trial, df: pd.DataFrame, y: pd.Series, static_features: pd.DataFra
         roc_lags_choice = trial.suggest_categorical("feature_roc_lags", roc_lags_options)
         feature_params_raw["roc_lags"] = roc_lags_choice
 
-        feature_cfg = FeatureConfig(**feature_params_raw)
+        feature_cfg = FeatureCfg(**feature_params_raw)
 
         # --- 2. Build Features for this Trial (using cached static features) ---
         X = build_dynamic_features(df, static_features, feature_cfg, symbol)
@@ -117,35 +116,22 @@ def objective(trial, df: pd.DataFrame, y: pd.Series, static_features: pd.DataFra
 def run_tuning_for_symbol(sym: str):
     logger.info(f"🔹 Starting combined feature and model tuning for {sym}...")
 
-    # --- 1. Fetch all required dataframes ---
-    logger.info(f"Fetching primary data for {sym} on {cfg.timeframe}...")
-    df = fetch_bars(sym, cfg.timeframe, cfg.history_bars)
-
-    mta_df = None
-    if cfg.context_features.mta.enabled:
-        logger.info(f"Fetching MTA data for {sym} on {cfg.context_features.mta.timeframe}...")
-        mta_df = fetch_bars(sym, cfg.context_features.mta.timeframe, cfg.history_bars)
-
-    inter_market_df = None
-    if cfg.context_features.inter_market.enabled:
-        im_sym = cfg.context_features.inter_market.symbol
-        logger.info(f"Fetching Inter-Market data for {im_sym} on {cfg.timeframe}...")
-        inter_market_df = fetch_bars(im_sym, cfg.timeframe, cfg.history_bars)
-
-    # --- 2. Add contextual features ---
-    df = add_contextual_features(
-        df, 
-        mta_df=mta_df, 
-        inter_market_df=inter_market_df, 
-        mta_cfg=cfg.context_features.mta, 
-        im_cfg=cfg.context_features.inter_market
+    # --- 1. Get all data and static features from the centralized pipeline ---
+    # For tuning, we pass a default FeatureConfig and set build_dynamic=False.
+    # The dynamic features will be built inside the objective function for each trial.
+    static_features, y, df = get_training_data(
+        cfg, 
+        sym, 
+        feature_cfg=FeatureCfg(), # Pass a default/dummy config
+        source=cfg.data_source if hasattr(cfg, "data_source") else "csv",
+        build_dynamic=False # Instruct the pipeline to return intermediate artifacts for tuner
     )
 
-    # --- 3. Create labels and pre-calculate static features ---
-    y = binary_up_down(df, cfg.prediction_horizon)
-    static_features = build_static_features(df, symbol=sym, pa_cfg=cfg.context_features.price_action)
-    
-    # --- 4. Run Optuna Study ---
+    if df.empty:
+        logger.error(f"[{sym}] No data returned from pipeline. Skipping tuning.")
+        return
+
+    # --- 2. Run Optuna Study ---
     objective_partial = partial(objective, df=df, y=y, static_features=static_features, symbol=sym)
 
     study_name = f"feature_model_tuning_{sym.replace('#','_')}_history_{cfg.history_bars}"

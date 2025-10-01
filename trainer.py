@@ -13,8 +13,8 @@ from loguru import logger
 from datetime import datetime, timezone
 from typing import Optional
 
-from src.config import Cfg
-from src.utils import get_training_data, load_ensemble, save_ensemble, safe_retrain_ensemble
+from src.config import Cfg, FeatureCfg
+from src.utils import get_training_data, load_ensemble, save_ensemble, safe_retrain_ensemble, load_optuna_params
 from src.ensemble import Ensemble
 
 # Safe retraining parameters
@@ -36,8 +36,20 @@ def retrain_symbol(cfg: Cfg, symbol: str, dry_run: bool = True) -> dict:
         logger.info(f"[{symbol}] No existing ensemble; creating a new one")
         ens_old = Ensemble(cfg)
 
-    # fetch all available training data
-    data, X, y = get_training_data(cfg, symbol, load_all_data=True, source=cfg.data_source if hasattr(cfg, "data_source") else "mt5")
+    # Load best feature params from optuna study
+    optuna_params = load_optuna_params(symbol)
+    feature_params = optuna_params.get('features', {})
+    feature_cfg = FeatureCfg(**feature_params)
+
+    # fetch all available training data using the new centralized pipeline
+    data, X, y = get_training_data(
+        cfg, 
+        symbol, 
+        feature_cfg=feature_cfg, 
+        load_all_data=True, 
+        source=cfg.data_source if hasattr(cfg, "data_source") else "mt5"
+    )
+
     if X is None or X.empty or len(X) < MIN_SAMPLES_TO_RETRAIN:
         msg = f"[{symbol}] Not enough data to retrain: {0 if X is None else len(X)} samples"
         logger.warning(msg)

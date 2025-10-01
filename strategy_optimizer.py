@@ -1,11 +1,13 @@
+# strategy_optimizer.py
 import optuna
 import pandas as pd
 import numpy as np
 import logging
+import os
 import json
 import copy # Import copy module for deepcopy
 from sklearn.metrics import roc_auc_score
-from backtester import HybridBacktester # Corrected import
+from backtester import HybridBacktester
 from src.config import Cfg, RiskCfg # Import Cfg and RiskCfg
 
 # --- Setup Logging ---
@@ -19,7 +21,9 @@ base_cfg_obj = Cfg.from_yaml("config.yaml")
 N_TRIALS = base_cfg_obj.optuna_n_trials # Use from Cfg object
 STUDY_NAME = "strategy_optimization_v2"
 STORAGE_PATH = "sqlite:///optuna_results/strategy_optimization_v2.db"
-PARAMS_OUTPUT_FILE = "best_strategy_params.json"
+# NEW: Define a directory for strategy parameters
+PARAMS_OUTPUT_DIR = "optuna_results/strategy_params"
+PARAMS_OUTPUT_FILE = os.path.join(PARAMS_OUTPUT_DIR, "best_strategy_params.json")
 
 def run_backtest_for_trial(trial: optuna.Trial, params):
     """
@@ -29,6 +33,13 @@ def run_backtest_for_trial(trial: optuna.Trial, params):
     # Create a deep copy of the base Cfg object for this trial
     trial_cfg_obj = copy.deepcopy(base_cfg_obj)
     
+    # --- Temporarily disable safety features for pure optimization ---
+    logging.info("Temporarily disabling safety features (drawdown blocks, watchdog) for this optimization trial.")
+    trial_cfg_obj.risk.block_on_drawdown = 1.0  # Set to 100% to effectively disable
+    if hasattr(trial_cfg_obj, 'watchdog'):
+        trial_cfg_obj.watchdog.max_consecutive_losses = 0  # Set to 0 to disable
+        trial_cfg_obj.watchdog.cooldown_hours = 0.0
+
     # Update the risk parameters of the trial_cfg_obj directly
     trial_cfg_obj.risk.atr_multiplier_sl = params["atr_multiplier_sl"]
     trial_cfg_obj.risk.atr_multiplier_tp = params["atr_multiplier_tp"]
@@ -37,6 +48,7 @@ def run_backtest_for_trial(trial: optuna.Trial, params):
     trial_cfg_obj.risk.min_prob_short = params["min_prob_short"]
 
     # Instantiate HybridBacktester with the trial-specific Cfg object
+    # The backtester will now use its updated internal logic to fetch the correct data
     bt = HybridBacktester(trial_cfg_obj)
     
     # Run backtester, passing the actual trial object for pruning
@@ -53,11 +65,11 @@ def run_backtest_for_trial(trial: optuna.Trial, params):
     # Annualize Sharpe Ratio based on timeframe
     timeframe_minutes = trial_cfg_obj.timeframe_minutes()
     if timeframe_minutes is None or returns.std() == 0:
-        sharpe_ratio = 0.0
+        annualization_factor = 0.0 # Set to 0 if std is 0 to avoid division by zero
     else:
         # Assuming 252 trading days in a year, and 24*60 minutes in a day
         annualization_factor = np.sqrt(252 * (24 * 60 / timeframe_minutes))
-        sharpe_ratio = returns.mean() / returns.std() * annualization_factor
+    sharpe_ratio = returns.mean() / returns.std() * annualization_factor if returns.std() != 0 else 0.0
     
     logging.info(f"Trial completed. Sharpe Ratio: {sharpe_ratio:.4f}")
     return sharpe_ratio
@@ -114,6 +126,8 @@ def main():
 
     # Save the best parameters to a JSON file
     try:
+        # Ensure the output directory exists
+        os.makedirs(PARAMS_OUTPUT_DIR, exist_ok=True)
         with open(PARAMS_OUTPUT_FILE, 'w') as f:
             json.dump(best_params, f, indent=4)
         logging.info(f"Successfully saved best parameters to {PARAMS_OUTPUT_FILE}")

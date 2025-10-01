@@ -7,7 +7,7 @@ data_source: csv # "mt5" or "csv". Automatically switches to csv on non-windows
 # --- Optuna Tuning Specifics ---
 optuna_n_trials: 150  # 150
 optuna_pruning_interval: 100 # New: Interval for Optuna pruning checks
-n_jobs: -1 # Number of parallel jobs for tuning. -1 means all available CPU cores.
+n_jobs: 1 # Number of parallel jobs for tuning. -1 means all available CPU cores.
 roc_lags_options:
   - [1, 3, 5, 10]
   - [1, 2, 4, 8]
@@ -19,11 +19,11 @@ cv_samples_per_split: 300 # Affects number of splits in TimeSeriesSplit. Higher 
 
 # --- Symbols & timeframe ---
 # historical_data symbols for .csv needed: M5-EURUSD#, H1-EURUSD#, and M5-USDX-DEC25
-symbols: ["EURUSD#", "GBPUSD#", "USDJPY#"] #"EURUSD#", "GBPUSD#", "USDJPY#", "USDX-DEC25"
-timeframe: "H1"            # One of: M1, M5, M15, M30, H1, H4
-history_bars: 6048          # How many bars to pull when (re)starting #6048 18000 36000
+symbols: ["EURUSD#"] #"EURUSD#", "GBPUSD#", "USDJPY#", "USDX-DEC25"
+timeframe: "M5"            # One of: M1, M5, M15, M30, H1, H4
+history_bars: 6048          # How many bars to pull when (re)starting #6048 18000 36000  105,000 bars (for one year of M5 data)
 retrain_every_bars: 250     # Incremental retrain every N bars
-prediction_horizon: 3       # 6 Bars ahead for label (~30 min on M5)
+prediction_horizon: 6       # 6 Bars ahead for label (~30 min on M5)
 
 # --- Features (now tunable) ---
 features:
@@ -82,7 +82,7 @@ models:
 
 ensemble:
   method: soft_vote
-  threshold_metric: custom_pnl
+  threshold_metric: sharpe_ratio # custom_pnl # sharpe_ratio
   threshold_grid: auto
   min_ensemble_auc: 0.55        # Minimum AUC required to allow trading
   auto_threshold: true           # Auto-adjust thresholds based on historical PnL
@@ -125,7 +125,7 @@ risk:
   min_prob_short: 0.55
   block_on_drawdown: 0.1         # 0.1 pause if drawdown from equity peak exceeds 10%     #disable 1.0
   min_auc_improvement: 0.005     # 0.005 default # minimum improvement in AUC to accept a new model
-  max_drawdown_for_pruning: 0.40 # New: Max drawdown allowed before Optuna trial pruning
+  max_drawdown_for_pruning: 0.40 # New: Max drawdown allowed before Optuna trial pruning  #disable 1.0
   session_filter:
     start: "00:00"
     end: "23:59"
@@ -142,7 +142,7 @@ logging:
 # --- Monitoring / Safety ---
 watchdog:
   max_consecutive_losses: 5      # 5 Stop trading if more than N losses in a row    #disable 0
-  cooldown_hours: 1              # 1 Pause trading for X hours if triggered #disable 0.0
+  cooldown_hours: 1              # 1 Pause trading for X hours if triggered       #disable 0.0
 
 # --- Misc / Transparency ---
 startup_logging: true             # log key settings at bot launch for transparency

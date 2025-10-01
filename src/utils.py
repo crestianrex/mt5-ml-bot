@@ -7,7 +7,7 @@ import copy
 from loguru import logger
 import pandas as pd
 from src.config import Cfg, FeatureCfg
-from src.features import build_features
+from src.features import build_static_features, build_dynamic_features, add_contextual_features
 from src.labels import binary_up_down
 from src.ensemble import Ensemble
 
@@ -43,29 +43,19 @@ def load_optuna_params(symbol: str) -> dict | None:
     logger.info(f"[{symbol}] Loaded Optuna best params from {file_path}")
     return loaded_params.get("models", {})
 
-def get_training_data(cfg: Cfg, symbol: str, count: int | None = None, source: str = "csv", load_all_data: bool = False):
+def get_training_data(cfg: Cfg, symbol: str, feature_cfg: FeatureCfg, count: int | None = None, source: str = "csv", load_all_data: bool = False, build_dynamic: bool = True):
     """
-    Returns (data, X, y):
-      - data: merged DataFrame with features+labels
-      - X: features DataFrame
-      - y: labels Series
-    On error or if insufficient data, returns (empty_df, empty_df, empty_series)
+    New centralized data pipeline.
+    - If build_dynamic is True, returns (data, X, y) for trainers/backtesters.
+    - If build_dynamic is False, returns (static_features, y, df) for the tuner.
     """
-    if load_all_data:
-        fetch_count = None
-    else:
-        fetch_count = count if count is not None else cfg.history_bars
+    fetch_count = None if load_all_data else (count if count is not None else cfg.history_bars)
 
-    # If on a non-Windows platform, MT5 is not available, so force CSV usage.
+    # --- 1. Select Data Source ---
     if sys.platform != "win32" and source == "mt5":
         logger.warning(f"MT5 is not supported on {sys.platform}. Switching to 'csv' data source.")
         source = "csv"
-        
-    if load_all_data:
-        logger.info(f"[{symbol}] Fetching ALL available bars for timeframe {cfg.timeframe} from {source.upper()}...")
-    else:
-        logger.info(f"[{symbol}] Fetching {fetch_count} bars for timeframe {cfg.timeframe} from {source.upper()}...")
-
+    
     if source == "mt5":
         from src.data import fetch_bars, merge_features_labels
     elif source == "csv":
@@ -73,21 +63,51 @@ def get_training_data(cfg: Cfg, symbol: str, count: int | None = None, source: s
     else:
         raise ValueError(f"Unknown data source: {source}")
 
+    # --- 2. Fetch All Dataframes ---
+    logger.info(f"[{symbol}] Fetching primary data ({fetch_count or 'all'} bars, {cfg.timeframe}) from {source.upper()}...")
     df = fetch_bars(symbol, cfg.timeframe, fetch_count)
     if df is None or df.empty:
         return pd.DataFrame(), pd.DataFrame(), pd.Series(dtype="float64")
 
-    logger.info(f"[{symbol}] Building features...")
-    feature_cfg = FeatureCfg(**(cfg.features.__dict__ if hasattr(cfg, "features") else {}))
-    timeframe_minutes = (cfg.timeframe_seconds() // 60) if cfg.timeframe_seconds() else None
-    X = build_features(df, feature_cfg, symbol=symbol, timeframe_minutes=timeframe_minutes)
+    mta_df = None
+    if cfg.context_features.mta.enabled:
+        logger.info(f"[{symbol}] Fetching MTA data ({fetch_count or 'all'} bars, {cfg.context_features.mta.timeframe})...")
+        mta_df = fetch_bars(symbol, cfg.context_features.mta.timeframe, fetch_count)
 
-    logger.info(f"[{symbol}] Building labels...")
+    inter_market_df = None
+    if cfg.context_features.inter_market.enabled:
+        im_sym = cfg.context_features.inter_market.symbol
+        logger.info(f"[{symbol}] Fetching Inter-Market data for {im_sym} ({fetch_count or 'all'} bars, {cfg.timeframe})...")
+        inter_market_df = fetch_bars(im_sym, cfg.timeframe, fetch_count)
+
+    # --- 3. Build Feature Set ---
+    logger.info(f"[{symbol}] Building full feature set...")
+    df = add_contextual_features(
+        df, 
+        mta_df=mta_df, 
+        inter_market_df=inter_market_df, 
+        mta_cfg=cfg.context_features.mta, 
+        im_cfg=cfg.context_features.inter_market
+    )
+    
     y = binary_up_down(df, cfg.prediction_horizon)
+    static_features = build_static_features(df, symbol=symbol, pa_cfg=cfg.context_features.price_action)
 
+    if not build_dynamic:
+        # Return the intermediate artifacts needed by the tuner
+        logger.info(f"[{symbol}] Data pipeline complete for tuner. Returning static features and base df.")
+        return static_features, y, df
+
+    # --- 4. Build Final Features (for trainer/backtester) ---
+    dynamic_features = build_dynamic_features(df, static_features, feature_cfg, symbol)
+    
+    X = dynamic_features
     data = merge_features_labels(df, X, y)
+
     if data is None or data.empty:
         return pd.DataFrame(), X if X is not None else pd.DataFrame(), y if y is not None else pd.Series(dtype="float64")
+    
+    logger.info(f"[{symbol}] Data pipeline complete. Final shape: {data.shape}")
     return data, X, y
 
 def load_ensemble(cfg: Cfg, symbol: str) -> Ensemble:

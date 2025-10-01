@@ -2,15 +2,16 @@
 import os
 import time
 import copy
+from multiprocessing import Process
 from dotenv import load_dotenv
 from loguru import logger
 import pandas as pd
-from src.config import Cfg
+from src.config import Cfg, FeatureCfg
 import MetaTrader5 as mt5  # type: ignore
 from src.mt5_client import MT5Client
 from src.risk import RiskManager
 from src.execution import Execution
-from src.utils import setup_logging, get_training_data, load_ensemble, save_ensemble, safe_retrain_ensemble
+from src.utils import setup_logging, get_training_data, load_ensemble, save_ensemble, safe_retrain_ensemble, load_optuna_params
 
 # --- Initial Setup ---
 load_dotenv()
@@ -58,6 +59,26 @@ def print_dashboard(cfg, risk, ens_per_symbol, X_per_symbol, bar_counter):
             open_pos = risk.open_positions_cache.get(sym, 'None')
             logger.info(f"[{sym}] ATR={atr:.5f} | p_up={p_up:.3f} | Open Positions: {open_pos}")
 
+def run_retraining_in_background(cfg, sym, feature_cfg, dry_run):
+    """
+    A wrapper function to run the entire retraining pipeline in a separate process.
+    """
+    try:
+        logger.info(f"[{sym}] Background process started for retraining.")
+        full_data, full_X, full_y = get_training_data(cfg, sym, feature_cfg=feature_cfg, source=cfg.data_source, load_all_data=True)
+        
+        if full_X.empty or full_y.empty:
+            logger.warning(f"[{sym}] No data for retraining, background process exiting.")
+            return
+
+        ens_old = load_ensemble(cfg, sym)
+        
+        safe_retrain_ensemble(cfg, sym, ens_old, full_X, full_y, full_data["close"] if "close" in full_data.columns else None, dry_run=dry_run)
+        logger.info(f"[{sym}] Background retraining process finished.")
+    except Exception as e:
+        logger.exception(f"[{sym}] Background retraining process failed: {e}")
+
+
 def run(dry_run: bool = False):
     """ Production-ready main loop for hybrid adaptive MT5 ML bot. """
     cfg = Cfg.from_yaml("config.yaml")
@@ -78,12 +99,20 @@ def run(dry_run: bool = False):
         logger.error("MT5 connection failed. Exiting.")
         return
 
-    # --- Load Ensembles ---
+    # --- Load Ensembles and Feature Configs ---
     ens_per_symbol = {sym: load_ensemble(cfg, sym) for sym in cfg.symbols}
+    feature_cfg_per_symbol = {}
+    for sym in cfg.symbols:
+        optuna_params = load_optuna_params(sym)
+        feature_params = optuna_params.get('features', {}) if optuna_params else {}
+        from src.config import FeatureCfg
+        feature_cfg_per_symbol[sym] = FeatureCfg(**feature_params)
+
     bar_counters = {sym: 0 for sym in cfg.symbols}
     last_bar_time = {sym: None for sym in cfg.symbols}
     X_per_symbol = {}
     risk = RiskManager(cfg)
+    retraining_processes = {}
 
     try:
         while True:
@@ -99,8 +128,17 @@ def run(dry_run: bool = False):
 
             for sym in cfg.symbols:
                 try:
-                    # --- Fetch latest bar data (minimal history for speed) ---
-                    data, X, y = get_training_data(cfg, sym, count=150, source="mt5")
+                    # --- Check for finished retraining processes ---
+                    if sym in retraining_processes and not retraining_processes[sym].is_alive():
+                        logger.info(f"[{sym}] Background retraining process finished. Joining process and reloading model.")
+                        retraining_processes[sym].join()  # Clean up the finished process
+                        ens_per_symbol[sym] = load_ensemble(cfg, sym)  # Reload the potentially updated model from disk
+                        del retraining_processes[sym]
+                        logger.info(f"[{sym}] New model loaded.")
+
+                    # --- Fetch latest bar data using the new pipeline ---
+                    feature_cfg = feature_cfg_per_symbol[sym]
+                    data, X, y = get_training_data(cfg, sym, feature_cfg=feature_cfg, count=500, source="mt5")
                     if data.empty:
                         continue
 
@@ -112,16 +150,15 @@ def run(dry_run: bool = False):
                     bar_counters[sym] += 1
                     logger.info(f"[{sym}] New bar detected at {latest_bar_time}")
 
-                    # --- Safe Incremental Retraining ---
+                    # --- Safe Incremental Retraining (now in background) ---
                     if bar_counters[sym] % cfg.retrain_every_bars == 0:
-                        logger.info(f"[{sym}] Starting safe retraining...")
-                        full_data, full_X, full_y = get_training_data(cfg, sym, source=cfg.data_source)
-                        
-                        ens_old = ens_per_symbol[sym]
-                        ens_new = safe_retrain_ensemble(cfg, sym, ens_old, full_X, full_y, full_data["close"] if "close" in full_data.columns else None, dry_run=dry_run)
-                        
-                        # Update the ensemble in the main bot's state
-                        ens_per_symbol[sym] = ens_new
+                        if sym not in retraining_processes:
+                            logger.info(f"[{sym}] Triggering safe retraining in background.")
+                            p = Process(target=run_retraining_in_background, args=(cfg, sym, feature_cfg, dry_run))
+                            p.start()
+                            retraining_processes[sym] = p
+                        else:
+                            logger.info(f"[{sym}] Retraining already in progress. Skipping trigger.")
 
                     # --- Manage existing trades first ---
                     try:
@@ -157,6 +194,12 @@ def run(dry_run: bool = False):
 
     except KeyboardInterrupt:
         logger.info("=== Stopping MT5 ML Bot ===")
+        # Optional: clean up any running child processes
+        for sym, p in retraining_processes.items():
+            if p.is_alive():
+                logger.warning(f"[{sym}] Terminating running retraining process due to bot shutdown.")
+                p.terminate()
+                p.join()
     finally:
         mt5c.shutdown()
         logger.info("MT5 shutdown complete.")

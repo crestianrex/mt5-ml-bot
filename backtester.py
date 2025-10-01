@@ -9,9 +9,9 @@ import quantstats as qs
 import optuna
 import numpy as np # Added numpy import
 
-from src.config import Cfg
+from src.config import Cfg, FeatureCfg
 from src.risk import RiskManager
-from src.utils import get_training_data, load_ensemble, save_ensemble, setup_logging, safe_retrain_ensemble
+from src.utils import get_training_data, load_ensemble, save_ensemble, setup_logging, safe_retrain_ensemble, load_optuna_params
 
 
 # --- Initial Setup ---
@@ -66,7 +66,7 @@ class HybridBacktester:
         self.logged_low_confidence = set()
         self.logged_skips = set()
         self.cfg = cfg
-        self.equity = 1000.0
+        self.equity = 100.0
         self.initial_equity = self.equity # Store initial equity for drawdown pruning
         self.positions: list[SimPosition] = []
         self.equity_curve = []
@@ -146,21 +146,25 @@ class HybridBacktester:
                 )
 
     def _perform_retraining(self, sym: str, bar_time: pd.Timestamp, i: int, data: pd.DataFrame, X: pd.DataFrame):
-        """Handles the logic for retraining the model."""
-        if self.bar_counters[sym] > 0 and self.bar_counters[sym] % self.cfg.retrain_every_bars == 0:
-            window_size = min(self.cfg.history_bars, i + 1)
-            train_data = data.iloc[i - window_size + 1: i + 1]
-            logger.info(
-                f"[{sym}] Ensemble retraining at {bar_time} using last {len(train_data)} bars..."
-            )
+        """
+        Handles the logic for retraining the model.
+        NOTE: Temporarily disabled to allow for pure strategy parameter optimization.
+        """
+        # if self.bar_counters[sym] > 0 and self.bar_counters[sym] % self.cfg.retrain_every_bars == 0:
+        #     window_size = min(self.cfg.history_bars, i + 1)
+        #     train_data = data.iloc[i - window_size + 1: i + 1]
+        #     logger.info(
+        #         f"[{sym}] Ensemble retraining at {bar_time} using last {len(train_data)} bars..."
+        #     )
 
-            ens_old = self.ens_per_symbol[sym]
+        #     ens_old = self.ens_per_symbol[sym]
             
-            # Use the shared safe_retrain_ensemble function
-            ens_new = safe_retrain_ensemble(self.cfg, sym, ens_old, train_data[X.columns], train_data["y"], train_data["close"] if "close" in train_data.columns else None)
+        #     # Use the shared safe_retrain_ensemble function
+        #     # IMPORTANT: A dry_run=True flag should be added here to prevent overwriting prod models.
+        #     ens_new = safe_retrain_ensemble(self.cfg, sym, ens_old, train_data[X.columns], train_data["y"], train_data["close"] if "close" in train_data.columns else None)
             
-            # Update the ensemble in the backtester's state
-            self.ens_per_symbol[sym] = ens_new
+        #     # Update the ensemble in the backtester's state
+        #     self.ens_per_symbol[sym] = ens_new
             
         return self.ens_per_symbol[sym]
 
@@ -280,7 +284,7 @@ class HybridBacktester:
                 else:
                     logger.info(f"[{sym}] Trade skipped due to risk limits or position size zero.")
             else:
-                logger.info(f"[{sym}] No trade signal. Probs: (Up: {prob_up:.3f}, Down: {1-prob_up:.3f})")
+                logger.info(f"[{sym}] No trade signal. Probs: (Up: {prob_up:.3f}, Down: {1-prob_up:.3f}) ")
 
             self.equity_curve.append((bar_time, self.equity))
 
@@ -334,7 +338,13 @@ class HybridBacktester:
 
         for sym in self.cfg.symbols:
             logger.info(f"--- Backtesting Symbol: {sym} ---")
-            data, X, y = get_training_data(self.cfg, sym, source=self.cfg.data_source)
+            
+            # Load best feature params from optuna study
+            optuna_params = load_optuna_params(sym)
+            feature_params = optuna_params.get('features', {}) if optuna_params else {}
+            feature_cfg = FeatureCfg(**feature_params)
+
+            data, X, y = get_training_data(self.cfg, sym, feature_cfg=feature_cfg, source=self.cfg.data_source)
             if data.empty:
                 logger.warning(f"No data for {sym}, skipping.")
                 continue
