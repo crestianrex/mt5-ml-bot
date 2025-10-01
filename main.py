@@ -6,7 +6,8 @@ from multiprocessing import Process
 from dotenv import load_dotenv
 from loguru import logger
 import pandas as pd
-from src.config import Cfg, FeatureCfg
+from src.config import Cfg
+from src.features import FeatureConfig
 import MetaTrader5 as mt5  # type: ignore
 from src.mt5_client import MT5Client
 from src.risk import RiskManager
@@ -105,8 +106,8 @@ def run(dry_run: bool = False):
     for sym in cfg.symbols:
         optuna_params = load_optuna_params(sym)
         feature_params = optuna_params.get('features', {}) if optuna_params else {}
-        from src.config import FeatureCfg
-        feature_cfg_per_symbol[sym] = FeatureCfg(**feature_params)
+
+        feature_cfg_per_symbol[sym] = FeatureConfig(**feature_params)
 
     bar_counters = {sym: 0 for sym in cfg.symbols}
     last_bar_time = {sym: None for sym in cfg.symbols}

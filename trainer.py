@@ -13,7 +13,8 @@ from loguru import logger
 from datetime import datetime, timezone
 from typing import Optional
 
-from src.config import Cfg, FeatureCfg
+from src.config import Cfg
+from src.features import FeatureConfig
 from src.utils import get_training_data, load_ensemble, save_ensemble, safe_retrain_ensemble, load_optuna_params
 from src.ensemble import Ensemble
 
@@ -39,7 +40,7 @@ def retrain_symbol(cfg: Cfg, symbol: str, dry_run: bool = True) -> dict:
     # Load best feature params from optuna study
     optuna_params = load_optuna_params(symbol)
     feature_params = optuna_params.get('features', {})
-    feature_cfg = FeatureCfg(**feature_params)
+    feature_cfg = FeatureConfig(**feature_params)
 
     # fetch all available training data using the new centralized pipeline
     data, X, y = get_training_data(

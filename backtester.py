@@ -9,7 +9,8 @@ import quantstats as qs
 import optuna
 import numpy as np # Added numpy import
 
-from src.config import Cfg, FeatureCfg
+from src.config import Cfg
+from src.features import FeatureConfig
 from src.risk import RiskManager
 from src.utils import get_training_data, load_ensemble, save_ensemble, setup_logging, safe_retrain_ensemble, load_optuna_params
 
@@ -342,7 +343,7 @@ class HybridBacktester:
             # Load best feature params from optuna study
             optuna_params = load_optuna_params(sym)
             feature_params = optuna_params.get('features', {}) if optuna_params else {}
-            feature_cfg = FeatureCfg(**feature_params)
+            feature_cfg = FeatureConfig(**feature_params)
 
             data, X, y = get_training_data(self.cfg, sym, feature_cfg=feature_cfg, source=self.cfg.data_source)
             if data.empty:

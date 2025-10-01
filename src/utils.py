@@ -6,8 +6,7 @@ import sys
 import copy
 from loguru import logger
 import pandas as pd
-from src.config import Cfg, FeatureCfg
-from src.features import build_static_features, build_dynamic_features, add_contextual_features
+from src.features import FeatureConfig, build_static_features, build_dynamic_features, add_contextual_features
 from src.labels import binary_up_down
 from src.ensemble import Ensemble
 
@@ -43,7 +42,7 @@ def load_optuna_params(symbol: str) -> dict | None:
     logger.info(f"[{symbol}] Loaded Optuna best params from {file_path}")
     return loaded_params.get("models", {})
 
-def get_training_data(cfg: Cfg, symbol: str, feature_cfg: FeatureCfg, count: int | None = None, source: str = "csv", load_all_data: bool = False, build_dynamic: bool = True):
+def get_training_data(cfg: Cfg, symbol: str, feature_cfg: FeatureConfig, count: int | None = None, source: str = "csv", load_all_data: bool = False, build_dynamic: bool = True):
     """
     New centralized data pipeline.
     - If build_dynamic is True, returns (data, X, y) for trainers/backtesters.

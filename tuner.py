@@ -10,7 +10,8 @@ from functools import partial
 from joblib import Parallel, delayed
 import traceback # Added for detailed error logging
 
-from src.config import Cfg
+from src.config import Cfg, RiskCfg
+from src.features import FeatureConfig, build_dynamic_features
 from src.data_colab import fetch_bars, merge_features_labels
 from src.utils import get_training_data
 from src.ensemble import Ensemble
@@ -66,7 +67,7 @@ def objective(trial, df: pd.DataFrame, y: pd.Series, static_features: pd.DataFra
         roc_lags_choice = trial.suggest_categorical("feature_roc_lags", roc_lags_options)
         feature_params_raw["roc_lags"] = roc_lags_choice
 
-        feature_cfg = FeatureCfg(**feature_params_raw)
+        feature_cfg = FeatureConfig(**feature_params_raw)
 
         # --- 2. Build Features for this Trial (using cached static features) ---
         X = build_dynamic_features(df, static_features, feature_cfg, symbol)
@@ -122,7 +123,7 @@ def run_tuning_for_symbol(sym: str):
     static_features, y, df = get_training_data(
         cfg, 
         sym, 
-        feature_cfg=FeatureCfg(), # Pass a default/dummy config
+        feature_cfg=FeatureConfig(), # Pass a default/dummy config
         source=cfg.data_source if hasattr(cfg, "data_source") else "csv",
         build_dynamic=False # Instruct the pipeline to return intermediate artifacts for tuner
     )
