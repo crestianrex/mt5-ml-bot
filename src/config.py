@@ -90,6 +90,21 @@ class WatchdogCfg:
     daily_loss_limit: Optional[float] = None  # absolute or fraction of equity (if used)
 
 @dataclass
+class ReoptimizationTriggersCfg:
+    enabled: bool = True
+    check_interval_minutes: int = 60
+    lookback_days: int = 30
+    min_sharpe_ratio: float = 0.5
+    max_drawdown_percent: float = 0.20
+    min_ensemble_auc: float = 0.55
+
+@dataclass
+class MonitoringCfg:
+    monitor_state_file: str = "monitor_state.json"
+    telegram_bot_token: Optional[str] = None
+    telegram_chat_id: Optional[str] = None
+
+@dataclass
 class Cfg:
     symbols: List[str] = field(default_factory=lambda: ["EURUSD"])
     timeframe: str = "M5"
@@ -109,6 +124,8 @@ class Cfg:
     risk: RiskCfg = field(default_factory=RiskCfg)
     logging: Dict[str, Any] = field(default_factory=dict)
     watchdog: WatchdogCfg = field(default_factory=WatchdogCfg)
+    reoptimization_triggers: ReoptimizationTriggersCfg = field(default_factory=ReoptimizationTriggersCfg)
+    monitoring: MonitoringCfg = field(default_factory=MonitoringCfg)
 
     def timeframe_seconds(self) -> Optional[int]:
         """ Convert timeframe string like 'M5', 'H1', 'D1' to seconds.
@@ -188,6 +205,22 @@ class Cfg:
             logger.warning(f"Invalid watchdog config in YAML: {e}; using defaults.")
             watchdog_obj = WatchdogCfg()
 
+        # parse reoptimization_triggers block if present
+        try:
+            reopt_raw = raw.get("reoptimization_triggers", {}) or {}
+            reopt_obj = ReoptimizationTriggersCfg(**reopt_raw) if reopt_raw else ReoptimizationTriggersCfg()
+        except Exception as e:
+            logger.warning(f"Invalid reoptimization_triggers config in YAML: {e}; using defaults.")
+            reopt_obj = ReoptimizationTriggersCfg()
+
+        # parse monitoring block if present
+        try:
+            mon_raw = raw.get("monitoring", {}) or {}
+            mon_obj = MonitoringCfg(**mon_raw) if mon_raw else MonitoringCfg()
+        except Exception as e:
+            logger.warning(f"Invalid monitoring config in YAML: {e}; using defaults.")
+            mon_obj = MonitoringCfg()
+
         return Cfg(
             symbols=raw.get("symbols", ["EURUSD"]),
             timeframe=raw.get("timeframe", "M5"),
@@ -207,4 +240,6 @@ class Cfg:
             risk=risk_obj,
             logging=raw.get("logging", {}),
             watchdog=watchdog_obj,
+            reoptimization_triggers=reopt_obj,
+            monitoring=mon_obj,
         )

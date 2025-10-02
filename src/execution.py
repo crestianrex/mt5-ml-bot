@@ -8,6 +8,9 @@ from .ensemble import Ensemble
 from .risk import RiskManager
 import pandas as pd
 import numpy as np
+from typing import List, Optional # Import Optional
+from backtester import SimPosition # Import SimPosition
+from .notifier import TelegramNotifier # NEW import
 
 @dataclass
 class OrderResult:
@@ -18,7 +21,11 @@ class OrderResult:
 class Execution:
     """ Handles trade decision & order sending with retries + dry-run. """
 
-    def __init__(self, ensemble: Ensemble, risk_manager: RiskManager, dry_run: bool = False):
+    def __init__(self, ensemble: Ensemble, risk_manager: RiskManager, dry_run: bool = False, notifier: Optional[TelegramNotifier] = None):
+        self.ens = ensemble
+        self.risk = risk_manager
+        self.dry_run = dry_run
+        self.notifier = notifier # NEW
         self.ens = ensemble
         self.risk = risk_manager
         self.dry_run = dry_run
@@ -53,6 +60,7 @@ class Execution:
                 prob_up = float(prob_series)
         except Exception as e:
             logger.exception(f"Prediction failed for {symbol}: {e}")
+            if self.notifier: self.notifier.send_message(f"<b>ERROR:</b> Prediction failed for {symbol}: {e}", level="ERROR")
             return OrderResult(False, None, "Prediction failed")
 
         # Use optimized threshold if available, otherwise fallback to config
@@ -66,11 +74,13 @@ class Execution:
 
         account_info = mt5.account_info()
         if not account_info:
+            if self.notifier: self.notifier.send_message(f"<b>ERROR:</b> Account info unavailable for {symbol}.", level="ERROR")
             return OrderResult(False, None, "Account info unavailable")
         equity = getattr(account_info, "equity", 0.0)
 
         symbol_info = mt5.symbol_info(symbol)
         if not symbol_info:
+            if self.notifier: self.notifier.send_message(f"<b>ERROR:</b> Symbol info unavailable for {symbol}.", level="ERROR")
             return OrderResult(False, None, "Symbol info unavailable")
 
         pip_size = getattr(symbol_info, "point", None)
@@ -87,6 +97,7 @@ class Execution:
 
         tick = mt5.symbol_info_tick(symbol)
         if not tick:
+            if self.notifier: self.notifier.send_message(f"<b>ERROR:</b> Tick info unavailable for {symbol}.", level="ERROR")
             return OrderResult(False, None, "Tick info unavailable")
         price = float(tick.ask) if direction == "long" else float(tick.bid)
 
@@ -112,15 +123,19 @@ class Execution:
 
         if self.dry_run:
             logger.info(f"[DRY-RUN] Prepared {direction} for {symbol}: lots={lots}, SL={sl}, TP={tp}")
+            if self.notifier: self.notifier.send_message(f"[DRY-RUN] Prepared {direction} for {symbol}: lots={lots}, SL={sl}, TP={tp}", level="INFO")
             return OrderResult(True, None, "Dry-run prepared")
 
         res = self._send_order_with_retry(request)
         if res is None or getattr(res, "retcode", None) != getattr(mt5, "TRADE_RETCODE_DONE", 10009):
-            logger.error(f"Order failed after retries: {res}")
+            error_msg = f"<b>CRITICAL:</b> Order failed for {symbol} after retries: {res}"
+            logger.error(error_msg)
+            if self.notifier: self.notifier.send_message(error_msg, level="CRITICAL")
             return OrderResult(False, getattr(res, "order", None) if res else None, f"Order failed: {res}")
 
         ticket = getattr(res, "order", None)
         logger.info(f"Order executed: ticket={ticket}, dir={direction}, lots={lots}, SL={sl}, TP={tp}")
+        if self.notifier: self.notifier.send_message(f"<b>TRADE EXECUTED:</b> {direction} {lots} lots of {symbol} at {price:.5f}. SL:{sl:.5f} TP:{tp:.5f}", level="INFO")
 
         # compute effective risk and store in cache keyed by symbol
         try:
@@ -128,14 +143,38 @@ class Execution:
             risk_amt = equity * risk_per_trade
             sl_distance = max(1e-6, self.risk.cfg.atr_multiplier_sl * atr)
             effective_lots = (risk_amt / (sl_distance * pip_value)) if pip_value and sl_distance else 0.0
-            self.risk.open_positions_cache[symbol] = {"risk": float(effective_lots), "ticket": ticket}
+            
+            # Store comprehensive details for later SimPosition reconstruction
+            self.risk.open_positions_cache[symbol] = {
+                "risk": float(effective_lots),
+                "ticket": ticket,
+                "entry_price": price,
+                "direction": direction,
+                "lots": float(lots),
+                "entry_time": datetime.datetime.now(datetime.timezone.utc), # Use current UTC time
+                "atr": atr, # ATR at the time of entry
+                "entry_auc": auc_score, # AUC at the time of entry
+                "risk_fraction": effective_risk, # Effective risk fraction at entry
+                "sl": sl, # SL at entry
+                "tp": tp, # TP at entry
+            }
         except Exception as e:
             logger.warning(f"Could not record open position in cache: {e}")
+            if self.notifier: self.notifier.send_message(f"<b>WARNING:</b> Could not record open position in cache for {symbol}: {e}", level="WARNING")
 
         return OrderResult(True, ticket, "OK")
 
-    def manage_trades(self, symbol: str, atr: float):
+    def manage_trades(self, symbol: str, atr: float) -> List[SimPosition]:
         try:
-            self.risk.manage_open_positions(symbol, atr)
+            closed_trades = self.risk.manage_open_positions(symbol, atr)
+            # NEW: Notify about closed trades
+            for trade in closed_trades:
+                pnl_msg = "profit" if trade.pnl > 0 else "loss"
+                message = f"<b>TRADE CLOSED:</b> {trade.direction} {trade.lots} lots of {trade.symbol}. PnL: {trade.pnl:.2f} ({pnl_msg})."
+                logger.info(message)
+                if self.notifier: self.notifier.send_message(message, level="INFO")
+            return closed_trades
         except Exception as e:
             logger.exception(f"manage_trades error for {symbol}: {e}")
+            if self.notifier: self.notifier.send_message(f"<b>ERROR:</b> manage_trades error for {symbol}: {e}", level="ERROR")
+            return []

@@ -6,6 +6,9 @@ from loguru import logger
 from .config import Cfg
 import datetime
 from datetime import timezone, timedelta
+from typing import List, Optional # Import Optional
+from backtester import SimPosition # Import SimPosition
+from .notifier import TelegramNotifier # NEW import
 
 class RiskManager:
     """
@@ -15,13 +18,22 @@ class RiskManager:
     Callers: pass `cfg` (the Cfg object) to constructor so both risk and watchdog settings are available.
     """
 
-    def __init__(self, cfg: Cfg):
+    def __init__(self, cfg: Cfg, notifier: Optional[TelegramNotifier] = None):
         self.cfg = cfg
         self.risk_cfg = cfg.risk
         self.watchdog_cfg = cfg.watchdog
         self.equity_peak: float | None = None
         self.open_positions_cache: dict[str, dict] = {}
         self.cooldown_until: datetime.datetime | None = None
+        self.recently_closed_trades: List[SimPosition] = [] # New: To store closed trades for monitoring
+        self.notifier = notifier # NEW
+        self.cfg = cfg
+        self.risk_cfg = cfg.risk
+        self.watchdog_cfg = cfg.watchdog
+        self.equity_peak: float | None = None
+        self.open_positions_cache: dict[str, dict] = {}
+        self.cooldown_until: datetime.datetime | None = None
+        self.recently_closed_trades: List[SimPosition] = [] # New: To store closed trades for monitoring
 
     # ---------- Dynamic value helpers ----------
     def _get_dynamic_value(self, dynamic_cfg: dict | None, auc_score: float, default_val: float) -> float:
@@ -138,7 +150,9 @@ class RiskManager:
         hours = float(getattr(self.watchdog_cfg, "cooldown_hours", 1.0))
         current_time = now if now is not None else datetime.datetime.now(timezone.utc)
         self.cooldown_until = current_time + timedelta(hours=hours)
-        logger.warning(f"Watchdog triggered cooldown until {self.cooldown_until.isoformat()}")
+        message = f"<b>RISK ALERT:</b> Watchdog triggered cooldown until {self.cooldown_until.isoformat()}"
+        logger.warning(message)
+        if self.notifier: self.notifier.send_message(message, level="WARNING")
 
     def cooldown_active(self, now: datetime.datetime | None = None) -> bool:
         if self.cooldown_until is None:
@@ -188,7 +202,9 @@ class RiskManager:
         if max_losses is not None and max_losses > 0:
             lost = self._count_consecutive_losses()
             if lost >= max_losses:
-                logger.warning(f"Watchdog: consecutive losses {lost} >= threshold {max_losses}. Triggering cooldown.")
+                message = f"<b>RISK ALERT:</b> Watchdog: consecutive losses {lost} >= threshold {max_losses}. Triggering cooldown."
+                logger.warning(message)
+                if self.notifier: self.notifier.send_message(message, level="WARNING")
                 self._trigger_cooldown()
                 return False
 
@@ -208,57 +224,122 @@ class RiskManager:
 
         # 5) block on drawdown parameter (if provided separately)
         if drawdown >= getattr(self.risk_cfg, "block_on_drawdown", 0.10):
-            logger.info(f"Trading blocked: drawdown {drawdown:.3f} >= {self.risk_cfg.block_on_drawdown}")
+            message = f"<b>RISK ALERT:</b> Trading blocked: drawdown {drawdown:.3f} >= {self.risk_cfg.block_on_drawdown}"
+            logger.info(message)
+            if self.notifier: self.notifier.send_message(message, level="INFO")
             return False
 
         # allowed by default
         return True
 
     # ---------- Manage open positions (unchanged mostly) ----------
-    def manage_open_positions(self, symbol: str, atr: float):
+    def manage_open_positions(self, symbol: str, atr: float) -> List[SimPosition]:
         import MetaTrader5 as mt5  # type: ignore
         """
         Ensure open_positions_cache matches MT5 positions and apply BE/trailing rules.
+        Returns a list of SimPosition objects for trades that were closed in this cycle.
         """
+        self.recently_closed_trades.clear() # Clear for this cycle
+
         try:
             mt5_positions = mt5.positions_get(symbol=symbol) or []
             current_tickets = {int(p.ticket) for p in mt5_positions}
         except Exception as e:
             logger.exception(f"Failed to get MT5 positions for {symbol}: {e}")
-            return
+            return []
 
-        # remove cache entries for which ticket is not present anymore
-        symbols_to_remove = []
-        for sym, pos_data in list(self.open_positions_cache.items()):
+        # Identify and process closed positions
+        closed_tickets_in_cache = []
+        for sym_key, pos_data in list(self.open_positions_cache.items()):
             ticket = pos_data.get("ticket")
-            if ticket is None or ticket not in current_tickets:
-                symbols_to_remove.append(sym)
-        for sym in symbols_to_remove:
-            try:
-                del self.open_positions_cache[sym]
-                logger.info(f"[{sym}] Removed closed position from cache.")
-            except KeyError:
-                pass
+            if ticket is not None and ticket not in current_tickets:
+                closed_tickets_in_cache.append(ticket)
+                # Remove from cache
+                del self.open_positions_cache[sym_key]
+                logger.info(f"[{symbol}] Removed closed position {ticket} from cache.")
+
+                # Fetch deal history to reconstruct SimPosition
+                deals = mt5.history_deals_get(position=ticket)
+                if deals:
+                    # Find the deal that closed the position (usually the last one)
+                    closing_deal = None
+                    for deal in deals:
+                        # Check for actual trade deals (buy/sell) that have profit/loss
+                        if (deal.type == mt5.DEAL_TYPE_BUY or deal.type == mt5.DEAL_TYPE_SELL) and abs(deal.profit) > 1e-9:
+                            closing_deal = deal
+                    
+                    if closing_deal:
+                        # Reconstruct SimPosition from deal and cached info
+                        entry_price = pos_data.get("entry_price", 0.0)
+                        direction = pos_data.get("direction", "long")
+                        lots = pos_data.get("lots", 0.0)
+                        entry_time = pos_data.get("entry_time", datetime.datetime.now(timezone.utc))
+                        sl = pos_data.get("sl", 0.0)
+                        tp = pos_data.get("tp", 0.0)
+                        entry_auc = pos_data.get("entry_auc", 0.5)
+                        risk_fraction = pos_data.get("risk_fraction", 0.0)
+                        atr_at_entry = pos_data.get("atr", 0.0)
+
+                        pnl = float(closing_deal.profit)
+                        exit_price = float(closing_deal.price)
+                        exit_time = datetime.datetime.fromtimestamp(closing_deal.time, tz=timezone.utc)
+
+                        closed_sim_pos = SimPosition(
+                            symbol=symbol,
+                            direction=direction,
+                            lots=lots,
+                            entry_price=entry_price,
+                            sl=sl,
+                            tp=tp,
+                            entry_time=entry_time,
+                            atr=atr_at_entry,
+                            entry_auc=entry_auc,
+                            risk_fraction=risk_fraction
+                        )
+                        closed_sim_pos.close(exit_price, exit_time, pnl)
+                        self.recently_closed_trades.append(closed_sim_pos)
+                        logger.info(f"[{symbol}] Detected closed trade {ticket}. PnL: {pnl:.2f}")
+                    else:
+                        logger.warning(f"[{symbol}] Could not find a valid closing deal for ticket {ticket}.")
+                else:
+                    logger.warning(f"[{symbol}] No deal history found for closed position {ticket}.")
 
         if not mt5_positions:
             logger.debug(f"[{symbol}] No open positions in MT5.")
-            return
+            return self.recently_closed_trades
 
         symbol_info = mt5.symbol_info(symbol)
         if not symbol_info:
             logger.warning(f"[{symbol}] Symbol info unavailable")
-            return
+            return self.recently_closed_trades
         point = float(symbol_info.point)
         tick = mt5.symbol_info_tick(symbol)
         if not tick:
             logger.warning(f"[{symbol}] Tick info unavailable")
-            return
+            return self.recently_closed_trades
 
         for pos in mt5_positions:
             entry = float(pos.price_open)
             sl = float(getattr(pos, "sl", 0.0))
             tp = float(getattr(pos, "tp", 0.0))
             direction = "long" if int(pos.type) == int(mt5.ORDER_TYPE_BUY) else "short"
+
+            # Update open_positions_cache with more details for later reconstruction
+            # Ensure existing details are preserved if not updated here
+            cached_pos_data = self.open_positions_cache.get(symbol, {})
+            self.open_positions_cache[symbol] = {
+                "risk": cached_pos_data.get("risk", 0.0), # Keep existing risk
+                "ticket": int(pos.ticket),
+                "entry_price": entry,
+                "direction": direction,
+                "lots": float(pos.volume),
+                "entry_time": datetime.datetime.fromtimestamp(pos.time_setup, tz=timezone.utc),
+                "sl": sl,
+                "tp": tp,
+                "atr": cached_pos_data.get("atr", 0.0), # Preserve ATR from entry
+                "entry_auc": cached_pos_data.get("entry_auc", 0.5), # Preserve AUC from entry
+                "risk_fraction": cached_pos_data.get("risk_fraction", 0.0), # Preserve risk_fraction from entry
+            }
 
             # profit in pips
             if direction == "long":
@@ -297,3 +378,5 @@ class RiskManager:
                     logger.exception(f"[{symbol}] Exception updating SL for ticket {pos.ticket}: {e}")
             else:
                 logger.debug(f"[{symbol}] No SL adjustment needed for ticket {pos.ticket}")
+        
+        return self.recently_closed_trades

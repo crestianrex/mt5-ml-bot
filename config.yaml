@@ -19,7 +19,7 @@ cv_samples_per_split: 300 # Affects number of splits in TimeSeriesSplit. Higher 
 
 # --- Symbols & timeframe ---
 # historical_data symbols for .csv needed: M5-EURUSD#, H1-EURUSD#, and M5-USDX-DEC25
-symbols: ["GBPUSD#"] #"EURUSD#", "GBPUSD#", "USDJPY#", "USDX-DEC25"
+symbols: ["USDJPY#"] #"EURUSD#", "GBPUSD#", "USDJPY#", "USDX-DEC25"
 timeframe: "M5"            # One of: M1, M5, M15, M30, H1, H4
 history_bars: 36000          # How many bars to pull when (re)starting #6048 18000 36000  105,000 bars (for one year of M5 data)
 retrain_every_bars: 250     # Incremental retrain every N bars
@@ -139,10 +139,25 @@ logging:
   rotate: 10 MB
   retention: 7 days
 
+# --- Re-optimization Triggers ---
+reoptimization_triggers:
+  enabled: true
+  check_interval_minutes: 60 # How often to check performance triggers
+  lookback_days: 30          # Period over which to calculate performance metrics
+  min_sharpe_ratio: 0.5      # If live Sharpe drops below this, trigger re-opt
+  max_drawdown_percent: 0.20 # If live drawdown exceeds this, trigger re-opt
+  min_ensemble_auc: 0.55     # If average ensemble AUC drops below this, trigger re-opt
+
 # --- Monitoring / Safety ---
 watchdog:
   max_consecutive_losses: 0      # 5 Stop trading if more than N losses in a row    #disable 0
   cooldown_hours: 0.0              # 1 Pause trading for X hours if triggered       #disable 0.0
+
+# --- Monitoring ---
+monitoring:
+  monitor_state_file: "monitor_state.json" # File to save LivePerformanceMonitor state
+  telegram_bot_token: "8063675444:AAFloolk3KYXs0SGpGRwiCILGpH6c1q3ep4" # Your Telegram Bot Token
+  telegram_chat_id: "-4809426556" # Your Telegram Chat ID (can be negative for groups)
 
 # --- Misc / Transparency ---
 startup_logging: true             # log key settings at bot launch for transparency

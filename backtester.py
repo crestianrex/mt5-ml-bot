@@ -149,23 +149,22 @@ class HybridBacktester:
     def _perform_retraining(self, sym: str, bar_time: pd.Timestamp, i: int, data: pd.DataFrame, X: pd.DataFrame):
         """
         Handles the logic for retraining the model.
-        NOTE: Temporarily disabled to allow for pure strategy parameter optimization.
         """
-        # if self.bar_counters[sym] > 0 and self.bar_counters[sym] % self.cfg.retrain_every_bars == 0:
-        #     window_size = min(self.cfg.history_bars, i + 1)
-        #     train_data = data.iloc[i - window_size + 1: i + 1]
-        #     logger.info(
-        #         f"[{sym}] Ensemble retraining at {bar_time} using last {len(train_data)} bars..."
-        #     )
+        if self.bar_counters[sym] > 0 and self.bar_counters[sym] % self.cfg.retrain_every_bars == 0:
+            window_size = min(self.cfg.history_bars, i + 1)
+            train_data = data.iloc[i - window_size + 1: i + 1]
+            logger.info(
+                f"[{sym}] Ensemble retraining at {bar_time} using last {len(train_data)} bars..."
+            )
 
-        #     ens_old = self.ens_per_symbol[sym]
+            ens_old = self.ens_per_symbol[sym]
             
-        #     # Use the shared safe_retrain_ensemble function
-        #     # IMPORTANT: A dry_run=True flag should be added here to prevent overwriting prod models.
-        #     ens_new = safe_retrain_ensemble(self.cfg, sym, ens_old, train_data[X.columns], train_data["y"], train_data["close"] if "close" in train_data.columns else None, dry_run=True)
+            # Use the shared safe_retrain_ensemble function
+            # IMPORTANT: A dry_run=True flag should be added here to prevent overwriting prod models.
+            ens_new = safe_retrain_ensemble(self.cfg, sym, ens_old, train_data[X.columns], train_data["y"], train_data["close"] if "close" in train_data.columns else None, dry_run=True)
             
-        #     # Update the ensemble in the backtester's state
-        #     self.ens_per_symbol[sym] = ens_new
+            # Update the ensemble in the backtester's state
+            self.ens_per_symbol[sym] = ens_new
             
         return self.ens_per_symbol[sym]
 
