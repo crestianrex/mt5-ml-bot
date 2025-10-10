@@ -115,13 +115,27 @@ class SymbolRiskState:
         if getattr(ts_cfg, "contextual_enabled", False):
             # small default context dimension; RiskController will define how to build the vector
             ctx_dim = int(getattr(ts_cfg, "context_dim", 5))
-            self.contextual_bandit = LinearThompson(num_arms=len(self.atr_grid_values), dim=ctx_dim, lambda_prior=1.0, noise_var=float(ts_cfg.obs_var or 1.0))
+            self.contextual_bandit = LinearThompson(
+                num_arms=len(self.atr_grid_values),
+                dim=ctx_dim,
+                lambda_prior=1.0,
+                noise_var=float(ts_cfg.obs_var or 1.0),
+                dynamic_noise_var_enabled=ts_cfg.dynamic_noise_var_enabled,
+                noise_var_window_size=ts_cfg.noise_var_window_size,
+                min_noise_var=ts_cfg.min_noise_var,
+                dynamic_uncertainty_risk_scaling_enabled=ts_cfg.dynamic_uncertainty_risk_scaling_enabled,
+                uncertainty_risk_factor=ts_cfg.uncertainty_risk_factor,
+                uncertainty_threshold=ts_cfg.uncertainty_threshold
+            )
 
         self.peak_equity: float = cfg.initial_equity
         self.current_equity: float = cfg.initial_equity
         self.consecutive_losses: int = 0
         self.recent_returns: deque[float] = deque(maxlen=ts_cfg.rule_rolling_window)
         self.last_atr: float = 0.0
+
+        # History for lagged features
+        self.vol_history: deque[float] = deque(maxlen=ts_cfg.lagged_vol_period + 1) if ts_cfg.enable_lagged_vol else deque(maxlen=1)
 
         # Track updates for adaptive grids
         self.atr_updates_since_last_adaptation: int = 0
@@ -149,6 +163,7 @@ class SymbolRiskState:
             "recent_returns": list(self.recent_returns),
             "last_atr": self.last_atr,
             "last_reset_time": self.last_reset_time.isoformat() if self.last_reset_time else None,
+            "vol_history": list(self.vol_history) if self.vol_history else [], # NEW
         }
         if self.contextual_bandit is not None:
             d["contextual_bandit"] = self.contextual_bandit.get_state()
@@ -169,10 +184,26 @@ class SymbolRiskState:
         inst.last_atr = state.get("last_atr", inst.last_atr)
         last_reset_time_str = state.get("last_reset_time")
         inst.last_reset_time = datetime.datetime.fromisoformat(last_reset_time_str) if last_reset_time_str else None
+        # Load vol_history
+        if cfg.thompson_sampling.enable_lagged_vol:
+            inst.vol_history = deque(state.get("vol_history", []), maxlen=cfg.thompson_sampling.lagged_vol_period + 1)
+        else:
+            inst.vol_history = deque(maxlen=1)
         if "contextual_bandit" in state and getattr(cfg.thompson_sampling, "contextual_enabled", False):
             # Re-initialize contextual bandit with loaded grid size
             ctx_dim = int(getattr(cfg.thompson_sampling, "context_dim", 9))
-            inst.contextual_bandit = LinearThompson(num_arms=len(inst.atr_grid_values), dim=ctx_dim, lambda_prior=1.0, noise_var=float(cfg.thompson_sampling.obs_var or 1.0))
+            inst.contextual_bandit = LinearThompson(
+                num_arms=len(inst.atr_grid_values),
+                dim=ctx_dim,
+                lambda_prior=1.0,
+                noise_var=float(cfg.thompson_sampling.obs_var or 1.0),
+                dynamic_noise_var_enabled=cfg.thompson_sampling.dynamic_noise_var_enabled,
+                noise_var_window_size=cfg.thompson_sampling.noise_var_window_size,
+                min_noise_var=cfg.thompson_sampling.min_noise_var,
+                dynamic_uncertainty_risk_scaling_enabled=cfg.thompson_sampling.dynamic_uncertainty_risk_scaling_enabled,
+                uncertainty_risk_factor=cfg.thompson_sampling.uncertainty_risk_factor,
+                uncertainty_threshold=cfg.thompson_sampling.uncertainty_threshold
+            )
             inst.contextual_bandit = LinearThompson.from_state(state["contextual_bandit"])
         return inst
 
@@ -275,7 +306,7 @@ class RiskController:
             volatility_10 = float(context.get("volatility_10", 0.0))
             dist_from_ema_200 = float(context.get("dist_from_ema_200", 0.0))
 
-            x = np.array([
+            current_x_features = [
                 vol / max(vol_scale, 1e-9),
                 auc,
                 drawdown,
@@ -285,9 +316,34 @@ class RiskController:
                 macd_diff * 1000.0, # Scale macd_diff for better feature representation
                 volatility_10 * 100.0, # Scale volatility
                 dist_from_ema_200 * 100.0, # Scale distance
-            ], dtype=float)
+            ]
+
+            # Add lagged vol if enabled
+            if ts_cfg.enable_lagged_vol and len(sym_state.vol_history) > ts_cfg.lagged_vol_period:
+                lagged_vol = sym_state.vol_history[-(ts_cfg.lagged_vol_period + 1)] # Get the lagged value
+                current_x_features.append(lagged_vol / max(vol_scale, 1e-9))
+            else:
+                # Append a placeholder if not enabled or not enough history
+                current_x_features.append(0.0)
+
+            # Add vol-drawdown interaction if enabled
+            if ts_cfg.enable_vol_drawdown_interaction:
+                vol_drawdown_interaction = (vol / max(vol_scale, 1e-9)) * drawdown
+                current_x_features.append(vol_drawdown_interaction)
+            else:
+                # Append a placeholder if not enabled
+                current_x_features.append(0.0)
+
+            x = np.array(current_x_features, dtype=float)
+
             # ensure dimension matches context_dim; if not, pad/truncate
-            ctx_dim = int(getattr(self.cfg.thompson_sampling, "context_dim", len(x)))
+            # Dynamically determine ctx_dim based on enabled features
+            expected_ctx_dim = 9 # Base features
+            if ts_cfg.enable_lagged_vol: expected_ctx_dim += 1
+            if ts_cfg.enable_vol_drawdown_interaction: expected_ctx_dim += 1
+
+            ctx_dim = int(getattr(self.cfg.thompson_sampling, "context_dim", expected_ctx_dim))
+
             if len(x) < ctx_dim:
                 x = np.concatenate([x, np.zeros(ctx_dim - len(x))])
             elif len(x) > ctx_dim:
@@ -325,6 +381,15 @@ class RiskController:
                 is_exploratory = True
                 exploration_risk_mult = float(ts_cfg.exploration_risk_mult)
 
+        # Apply uncertainty-based risk scaling if enabled
+        if ts_cfg.dynamic_uncertainty_risk_scaling_enabled and sym_state.contextual_bandit is not None:
+            # Get the noise_var for the chosen arm
+            chosen_arm_noise_var = sym_state.contextual_bandit.noise_var # This is the current dynamic noise_var
+            if chosen_arm_noise_var > ts_cfg.uncertainty_threshold:
+                uncertainty_penalty = (chosen_arm_noise_var / ts_cfg.uncertainty_threshold) * ts_cfg.uncertainty_risk_factor
+                exploration_risk_mult *= max(0.0, 1.0 - uncertainty_penalty)
+                logger.debug(f"[{symbol}] Uncertainty risk scaling applied: {exploration_risk_mult:.2f} (Noise Var: {chosen_arm_noise_var:.4f})")
+
         # Return chosen params plus exploratory metadata
         return {
             "atr_multiplier_sl": atr_choice,
@@ -337,6 +402,8 @@ class RiskController:
             "rule_scale": rule_scale,
             "is_exploratory": is_exploratory,
             "exploration_risk_mult": exploration_risk_mult,
+            "lagged_vol": current_x_features[9] if ts_cfg.enable_lagged_vol else 0.0, # Assuming index 9 for lagged_vol
+            "vol_drawdown_interaction": current_x_features[10] if ts_cfg.enable_vol_drawdown_interaction else 0.0 # Assuming index 10 for interaction
         }
 
     def update_after_trade(self, symbol: str, trade: SimPosition):
@@ -366,6 +433,26 @@ class RiskController:
         if not np.isfinite(reward):
             reward = 0.0
 
+        # Apply drawdown-aware penalties to the reward
+        current_drawdown = 1.0 - (sym_state.current_equity / sym_state.peak_equity) if sym_state.peak_equity > 0 else 0.0
+        if current_drawdown >= ts_cfg.drawdown_penalty_threshold:
+            penalty = current_drawdown * ts_cfg.drawdown_penalty_factor
+            reward -= penalty
+            logger.debug(f"[{symbol}] Drawdown penalty applied: -{penalty:.4f} (Current DD: {current_drawdown:.2%})")
+
+        if sym_state.consecutive_losses >= ts_cfg.consecutive_loss_penalty_threshold:
+            penalty = sym_state.consecutive_losses * ts_cfg.consecutive_loss_penalty_factor
+            reward -= penalty
+            logger.debug(f"[{symbol}] Consecutive loss penalty applied: -{penalty:.4f} (Consecutive Losses: {sym_state.consecutive_losses})")
+
+        # Apply win rate reward / loss penalty
+        if ts_cfg.enable_win_rate_reward and trade.profit > 0:
+            reward += ts_cfg.win_rate_reward_factor
+            logger.debug(f"[{symbol}] Win rate bonus applied: +{ts_cfg.win_rate_reward_factor:.4f}")
+        elif ts_cfg.enable_loss_penalty and trade.profit <= 0:
+            reward -= ts_cfg.loss_penalty_factor
+            logger.debug(f"[{symbol}] Loss penalty applied: -{ts_cfg.loss_penalty_factor:.4f}")
+
         # 2. Update bandits
         if trade.atr_idx is not None and trade.atr_idx != -1:
             sym_state.atr_bandit.update(trade.atr_idx, reward, ts_cfg.decay)
@@ -390,8 +477,12 @@ class RiskController:
                 hour_cos = np.cos(2 * np.pi * hour / 24.0)
                 vol = float(getattr(trade, "atr", sym_state.last_atr or 0.0))
                 auc = float(getattr(trade, "entry_auc", 0.5))
-                equity_exit = float(getattr(trade, "exit_equity", sym_state.current_equity or self.cfg.initial_equity))
-                drawdown = 1.0 - (equity_exit / max(sym_state.peak_equity or self.cfg.initial_equity, 1e-9))
+                # Use entry_equity for drawdown calculation at entry time
+                entry_equity = float(getattr(trade, "entry_equity", self.cfg.initial_equity))
+                # Need to get peak_equity at entry time, which is not directly stored in trade. 
+                # For simplicity, we'll use the current peak_equity, but ideally this would be historical.
+                # This is a limitation for perfect historical context reconstruction in update_after_trade.
+                drawdown_at_entry = 1.0 - (entry_equity / max(sym_state.peak_equity or self.cfg.initial_equity, 1e-9))
                 vol_scale = float(ts_cfg.vol_threshold or 1e-6)
 
                 # New context features from trade object
@@ -400,24 +491,50 @@ class RiskController:
                 volatility_10 = float(getattr(trade, "volatility_10", 0.0))
                 dist_from_ema_200 = float(getattr(trade, "dist_from_ema_200", 0.0))
 
-                x = np.array([
+                current_x_features = [
                     vol / max(vol_scale, 1e-9),
                     auc,
-                    drawdown,
+                    drawdown_at_entry,
                     hour_sin,
                     hour_cos,
                     adx / 100.0, # Normalize ADX (typically 0-100)
                     macd_diff * 1000.0, # Scale macd_diff for better feature representation
                     volatility_10 * 100.0, # Scale volatility
                     dist_from_ema_200 * 100.0, # Scale distance
-                ], dtype=float)
-                ctx_dim = int(getattr(ts_cfg, "context_dim", len(x)))
+                ]
+
+                # Add lagged vol if enabled (from trade object if available, otherwise from sym_state.vol_history)
+                if ts_cfg.enable_lagged_vol:
+                    # Ideally, lagged_vol should be stored in the trade object at entry.
+                    # For now, we'll use a placeholder or assume it's not perfectly reconstructible for past trades.
+                    # A more robust solution would be to store the full context vector in the trade object.
+                    lagged_vol_from_trade = float(getattr(trade, "lagged_vol", 0.0))
+                    current_x_features.append(lagged_vol_from_trade / max(vol_scale, 1e-9))
+                else:
+                    current_x_features.append(0.0)
+
+                # Add vol-drawdown interaction if enabled
+                if ts_cfg.enable_vol_drawdown_interaction:
+                    vol_drawdown_interaction = (vol / max(vol_scale, 1e-9)) * drawdown_at_entry
+                    current_x_features.append(vol_drawdown_interaction)
+                else:
+                    current_x_features.append(0.0)
+
+                x = np.array(current_x_features, dtype=float)
+
+                # Dynamically determine ctx_dim based on enabled features
+                expected_ctx_dim = 9 # Base features
+                if ts_cfg.enable_lagged_vol: expected_ctx_dim += 1
+                if ts_cfg.enable_vol_drawdown_interaction: expected_ctx_dim += 1
+
+                ctx_dim = int(getattr(ts_cfg, "context_dim", expected_ctx_dim))
+
                 if len(x) < ctx_dim:
                     x = np.concatenate([x, np.zeros(ctx_dim - len(x))])
                 elif len(x) > ctx_dim:
                     x = x[:ctx_dim]
                 if trade.atr_idx is not None and trade.atr_idx != -1:
-                    sym_state.contextual_bandit.update(int(trade.atr_idx), x, reward)
+                    sym_state.contextual_bandit.update(int(trade.atr_idx), x, reward, ts_cfg.decay)
             except Exception:
                 logger.exception("Contextual bandit update failed")
 
@@ -443,7 +560,9 @@ class RiskController:
                         # Re-initialize contextual bandit with new num_arms
                         ctx_dim = int(getattr(ts_cfg, "context_dim", 5))
                         old_contextual_bandit = sym_state.contextual_bandit
-                        sym_state.contextual_bandit = LinearThompson(num_arms=len(new_atr_grid), dim=ctx_dim, lambda_prior=1.0, noise_var=float(ts_cfg.obs_var or 1.0))
+                        sym_state.contextual_bandit = LinearThompson(num_arms=len(new_atr_grid), dim=ctx_dim, lambda_prior=1.0, noise_var=float(ts_cfg.obs_var or 1.0),
+                                                                    dynamic_noise_var_enabled=ts_cfg.dynamic_noise_var_enabled, noise_var_window_size=ts_cfg.noise_var_window_size, min_noise_var=ts_cfg.min_noise_var,
+                                                                    dynamic_uncertainty_risk_scaling_enabled=ts_cfg.dynamic_uncertainty_risk_scaling_enabled, uncertainty_risk_factor=ts_cfg.uncertainty_risk_factor, uncertainty_threshold=ts_cfg.uncertainty_threshold)
                         # Transfer state for contextual bandit (more complex, simple re-init for now)
                         # For LinearThompson, transferring A and b matrices would be ideal, but requires careful mapping.
                         # For simplicity, we'll re-initialize and let it learn on the new grid.
@@ -473,6 +592,10 @@ class RiskController:
         sym_state.peak_equity = max(sym_state.peak_equity, sym_state.current_equity)
         sym_state.recent_returns.append(reward) # Append normalized reward
         sym_state.last_atr = trade.atr # Update last ATR for rule scaling context
+
+        # Update vol_history for lagged features
+        if ts_cfg.enable_lagged_vol:
+            sym_state.vol_history.append(trade.atr) # Assuming trade.atr is the current vol
 
         if reward < 0:
             sym_state.consecutive_losses += 1
@@ -579,7 +702,18 @@ class RiskController:
         # Reset contextual bandit if enabled
         if getattr(ts_cfg, "contextual_enabled", False) and sym_state.contextual_bandit is not None:
             ctx_dim = int(getattr(ts_cfg, "context_dim", 9))
-            sym_state.contextual_bandit = LinearThompson(num_arms=len(ts_cfg.atr_grid), dim=ctx_dim, lambda_prior=1.0, noise_var=float(ts_cfg.obs_var or 1.0))
+            sym_state.contextual_bandit = LinearThompson(
+                num_arms=len(ts_cfg.atr_grid),
+                dim=ctx_dim,
+                lambda_prior=1.0,
+                noise_var=float(ts_cfg.obs_var or 1.0),
+                dynamic_noise_var_enabled=ts_cfg.dynamic_noise_var_enabled,
+                noise_var_window_size=ts_cfg.noise_var_window_size,
+                min_noise_var=ts_cfg.min_noise_var,
+                dynamic_uncertainty_risk_scaling_enabled=ts_cfg.dynamic_uncertainty_risk_scaling_enabled,
+                uncertainty_risk_factor=ts_cfg.uncertainty_risk_factor,
+                uncertainty_threshold=ts_cfg.uncertainty_threshold
+            )
 
         # Reset dynamic grids to initial config values
         sym_state.atr_grid_values = list(ts_cfg.atr_grid)

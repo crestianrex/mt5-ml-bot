@@ -293,6 +293,7 @@ def run(dry_run: bool = False):
 
             # --- Process closed trades first so bandit gets rewards before opening new trades ---
             closed_trades_this_cycle = exe.check_closed_trades()
+            exe._manage_trailing_stops() # MANAGE TRAILING STOPS
             for trade in closed_trades_this_cycle:
                 try:
                     live_monitor.add_closed_trade(trade)
@@ -422,6 +423,8 @@ def run(dry_run: bool = False):
                     atr_idx = dynamic_risk_params["atr_idx"]
                     min_prob_idx = dynamic_risk_params["min_prob_idx"]
                     rule_scale = dynamic_risk_params.get("rule_scale", 1.0)
+                    lagged_vol = dynamic_risk_params.get("lagged_vol", 0.0)
+                    vol_drawdown_interaction = dynamic_risk_params.get("vol_drawdown_interaction", 0.0)
 
                     # Log chosen parameters
                     log_metrics_to_csv({
@@ -499,7 +502,7 @@ def run(dry_run: bool = False):
                         else:
                             price = float(mt5.symbol_info_tick(sym).ask) if direction == "long" else float(mt5.symbol_info_tick(sym).bid)
                             sl, tp = risk.stop_targets(price, atr, direction, auc_score, sym, sl_mult=atr_multiplier_sl, tp_mult=atr_multiplier_tp)
-                            result = exe.trade(sym, last_features, atr, auc_score, total_open_risk, sl_mult=atr_multiplier_sl, tp_mult=atr_multiplier_tp, atr_idx=atr_idx, min_prob_idx=min_prob_idx)
+                            result = exe.trade(sym, last_features, atr, auc_score, total_open_risk, sl_mult=atr_multiplier_sl, tp_mult=atr_multiplier_tp, atr_idx=atr_idx, min_prob_idx=min_prob_idx, lagged_vol=lagged_vol, vol_drawdown_interaction=vol_drawdown_interaction)
                             # result = exe.trade(sym, X_for_ensemble, atr, auc_score, total_open_risk, sl_mult=atr_multiplier_sl, tp_mult=atr_multiplier_tp, atr_idx=atr_idx, min_prob_idx=min_prob_idx, X_for_context=X_for_context)
                             if result.ok:
                                 logger.info(f"[{sym}] Trade executed: {result.message}")

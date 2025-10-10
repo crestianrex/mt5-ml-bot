@@ -4,6 +4,7 @@ import yaml
 from dataclasses import dataclass, field
 from typing import List, Dict, Any, Optional
 import logging
+import os
 
 logger = logging.getLogger(__name__)
 
@@ -63,6 +64,12 @@ class RiskCfg:
     min_ensemble_auc: float = 0.55
     min_auc_improvement: float = 0.005
     max_drawdown_for_pruning: float = 0.70 # New: Max drawdown allowed before Optuna trial pruning
+    trailing_stop: Dict[str, Any] = field(
+        default_factory=lambda: {
+            "enabled": False,
+            "atr_distance": 1.5,
+        }
+    )
     dynamic_risk: Dict[str, Any] = field(
         default_factory=lambda: {
             "enabled": True,
@@ -156,6 +163,33 @@ class ThompsonSamplingCfg:
     reset_on_consecutive_losses: int = 10
     reset_on_low_ensemble_auc: float = 0.52
     reset_cooldown_hours: float = 24.0
+
+    # Drawdown-aware reward parameters
+    drawdown_penalty_threshold: float = 0.05 # % drawdown at which to start penalizing reward
+    drawdown_penalty_factor: float = 1.0     # Multiplier for drawdown penalty
+    consecutive_loss_penalty_threshold: int = 3 # Number of consecutive losses at which to start penalizing reward
+    consecutive_loss_penalty_factor: float = 0.5 # Multiplier for consecutive loss penalty
+
+    # Dynamic noise_var configuration
+    dynamic_noise_var_enabled: bool = False
+    noise_var_window_size: int = 50 # Number of recent rewards to consider for variance estimation
+    min_noise_var: float = 1e-6 # Minimum allowed noise variance
+
+    # Sophisticated Contextual Features
+    enable_lagged_vol: bool = False
+    lagged_vol_period: int = 1 # Number of bars to lag volatility
+    enable_vol_drawdown_interaction: bool = False
+
+    # Multi-objective reward configuration
+    enable_win_rate_reward: bool = False
+    win_rate_reward_factor: float = 0.1 # Bonus for winning trades
+    enable_loss_penalty: bool = False
+    loss_penalty_factor: float = 0.2 # Additional penalty for losing trades
+
+    # Uncertainty-based risk scaling
+    dynamic_uncertainty_risk_scaling_enabled: bool = False
+    uncertainty_risk_factor: float = 0.5 # Multiplier for risk reduction when uncertainty is high
+    uncertainty_threshold: float = 0.1 # Threshold for noise_var above which risk scaling applies
 
 @dataclass
 class Cfg:
@@ -270,10 +304,22 @@ class Cfg:
         # parse monitoring block if present
         try:
             mon_raw = raw.get("monitoring", {}) or {}
-            mon_obj = MonitoringCfg(**mon_raw) if mon_raw else MonitoringCfg()
+            # Securely load Telegram credentials from environment variables if not in YAML
+            telegram_bot_token = mon_raw.get("telegram_bot_token") or os.getenv("TELEGRAM_BOT_TOKEN")
+            telegram_chat_id = mon_raw.get("telegram_chat_id") or os.getenv("TELEGRAM_CHAT_ID")
+            
+            mon_obj = MonitoringCfg(
+                lookback_days=mon_raw.get("lookback_days", 30),
+                monitor_state_file=mon_raw.get("monitor_state_file", "monitor_state.json"),
+                telegram_bot_token=telegram_bot_token,
+                telegram_chat_id=telegram_chat_id,
+            )
         except Exception as e:
             logger.warning(f"Invalid monitoring config in YAML: {e}; using defaults.")
-            mon_obj = MonitoringCfg()
+            mon_obj = MonitoringCfg(
+                telegram_bot_token=os.getenv("TELEGRAM_BOT_TOKEN"),
+                telegram_chat_id=os.getenv("TELEGRAM_CHAT_ID"),
+            )
 
         # parse fetch block if present (bootstrap + local caching)
         try:

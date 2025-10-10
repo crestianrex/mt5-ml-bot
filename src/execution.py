@@ -31,6 +31,7 @@ class ClosedTrade:
     entry_time: datetime
     exit_time: datetime
     profit: float
+    entry_equity: float
     risk_fraction: float
     exit_equity: float
     atr: float
@@ -41,6 +42,8 @@ class ClosedTrade:
     macd_diff: float = 0.0
     volatility_10: float = 0.0
     dist_from_ema_200: float = 0.0
+    lagged_vol: float = 0.0 # NEW
+    vol_drawdown_interaction: float = 0.0 # NEW
 
     def __repr__(self):
         return f"<ClosedTrade ticket={self.ticket}, profit={self.profit:.2f}>"
@@ -181,6 +184,7 @@ class Execution:
                     entry_time=trade_details.get("entry_time"),
                     exit_time=exit_time_dt,
                     profit=final_profit,
+                    entry_equity=trade_details.get("entry_equity", 0.0),
                     risk_fraction=trade_details.get("risk_fraction", 0.0),
                     exit_equity=actual_equity,
                     atr=trade_details.get("atr", 0.0),
@@ -190,7 +194,9 @@ class Execution:
                     adx=trade_details.get("adx", 0.0),
                     macd_diff=trade_details.get("macd_diff", 0.0),
                     volatility_10=trade_details.get("volatility_10", 0.0),
-                    dist_from_ema_200=trade_details.get("dist_from_ema_200", 0.0)
+                    dist_from_ema_200=trade_details.get("dist_from_ema_200", 0.0),
+                    lagged_vol=trade_details.get("lagged_vol", 0.0), # NEW
+                    vol_drawdown_interaction=trade_details.get("vol_drawdown_interaction", 0.0) # NEW
                 )
                 closed_trades_list.append(closed_trade)
                 logger.info(f"Detected closed trade via reconciliation: {closed_trade}")
@@ -203,7 +209,61 @@ class Execution:
         
         return closed_trades_list
 
-    def trade(self, symbol: str, X: pd.DataFrame | None = None, atr: float | None = None, auc_score: float | None = 0.5, total_open_risk: float = 0.0, sl_mult: Optional[float] = None, tp_mult: Optional[float] = None, atr_idx: int = -1, min_prob_idx: int = -1) -> OrderResult:
+    def _manage_trailing_stops(self):
+        if not self.risk.cfg.risk.trailing_stop.get("enabled", False):
+            return
+
+        atr_distance = self.risk.cfg.risk.trailing_stop.get("atr_distance", 1.5)
+
+        for ticket, position in list(self.risk.open_positions_cache.items()):
+            symbol = position.get("symbol")
+            if not symbol:
+                continue
+
+            tick = mt5.symbol_info_tick(symbol)
+            if not tick:
+                continue
+
+            current_price = tick.bid if position["direction"] == "long" else tick.ask
+            entry_price = position["entry_price"]
+            current_sl = position.get("sl", 0.0)
+            atr = position.get("atr", 0.0)
+
+            if atr <= 0:
+                continue
+
+            new_sl = 0.0
+            if position["direction"] == "long" and current_price > entry_price:
+                new_sl = current_price - atr * atr_distance
+                if new_sl > current_sl:
+                    self._modify_position(ticket, new_sl, position.get("tp"))
+
+            elif position["direction"] == "short" and current_price < entry_price:
+                new_sl = current_price + atr * atr_distance
+                if new_sl < current_sl:
+                    self._modify_position(ticket, new_sl, position.get("tp"))
+
+    def _modify_position(self, ticket, sl, tp):
+        request = {
+            "action": mt5.TRADE_ACTION_SLTP,
+            "position": ticket,
+            "sl": float(sl),
+            "tp": float(tp),
+        }
+        if self.dry_run:
+            logger.info(f"[DRY-RUN] Modifying position {ticket}: SL={sl}, TP={tp}")
+            return
+
+        res = mt5.order_send(request)
+        if res and res.retcode == mt5.TRADE_RETCODE_DONE:
+            logger.info(f"Position {ticket} modified: SL={sl}, TP={tp}")
+            # Update local cache
+            if ticket in self.risk.open_positions_cache:
+                self.risk.open_positions_cache[ticket]["sl"] = sl
+        else:
+            logger.error(f"Failed to modify position {ticket}: {res}")
+
+    def trade(self, symbol: str, X: pd.DataFrame | None = None, atr: float | None = None, auc_score: float | None = 0.5, total_open_risk: float = 0.0, sl_mult: Optional[float] = None, tp_mult: Optional[float] = None, atr_idx: int = -1, min_prob_idx: int = -1, lagged_vol: float = 0.0, vol_drawdown_interaction: float = 0.0) -> OrderResult:
         if X is None or atr is None:
             return OrderResult(False, None, "X or ATR missing")
 
@@ -361,6 +421,8 @@ class Execution:
                 # NEW: Add inter_market_feature and mta_feature to open_positions_cache
                 "inter_market_feature": float(X["inter_market_feature"].iloc[-1]) if "inter_market_feature" in X.columns else 0.0,
                 "mta_feature": float(X["mta_feature"].iloc[-1]) if "mta_feature" in X.columns else 0.0,
+                "lagged_vol": lagged_vol, # NEW
+                "vol_drawdown_interaction": vol_drawdown_interaction # NEW
             }
         except Exception as e:
             logger.warning(f"Could not record open position in cache: {e}")

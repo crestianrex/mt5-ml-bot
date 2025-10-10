@@ -179,6 +179,9 @@ risk:
   block_on_drawdown: 1.0         # 0.1 pause if drawdown from equity peak exceeds 10%     #disable 1.0
   min_auc_improvement: 0.005     # 0.005 default # minimum improvement in AUC to accept a new model
   max_drawdown_for_pruning: 1.0 # New: Max drawdown allowed before Optuna trial pruning  #disable 1.0
+  trailing_stop:
+    enabled: false
+    atr_distance: 1.5
   session_filter:
     start: "00:00"
     end: "23:59"
@@ -202,6 +205,9 @@ watchdog:
 monitoring:
   lookback_days: 30 # Period over which to calculate performance metrics
   monitor_state_file: "monitor_state.json" # File to save LivePerformanceMonitor state
+  # For security, set your Telegram credentials as environment variables:
+  # export TELEGRAM_BOT_TOKEN="your_token_here"
+  # export TELEGRAM_CHAT_ID="your_chat_id_here"
   telegram_bot_token: "" # Your Telegram Bot Token
   telegram_chat_id: "" # Your Telegram Chat ID (can be negative for groups)
 
