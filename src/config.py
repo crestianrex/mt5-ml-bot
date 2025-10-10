@@ -84,25 +84,33 @@ class RiskCfg:
 
 @dataclass
 class WatchdogCfg:
+    enabled: bool = True
     max_consecutive_losses: int = 5
     cooldown_hours: float = 1.0
     # additional optional thresholds
     daily_loss_limit: Optional[float] = None  # absolute or fraction of equity (if used)
 
 @dataclass
-class ReoptimizationTriggersCfg:
-    enabled: bool = True
-    check_interval_minutes: int = 60
-    lookback_days: int = 30
-    min_sharpe_ratio: float = 0.5
-    max_drawdown_percent: float = 0.20
-    min_ensemble_auc: float = 0.55
-
-@dataclass
 class MonitoringCfg:
+    lookback_days: int = 30
     monitor_state_file: str = "monitor_state.json"
     telegram_bot_token: Optional[str] = None
     telegram_chat_id: Optional[str] = None
+
+@dataclass
+class TradingCostsDefaultsCfg:
+    spread_pips: float = 0.8
+    slippage_pips: float = 0.5
+    commission_per_trade: float = 0.0
+    lot_size: float = 0.1
+    pip_value: float = 0.0001
+    adaptive_slippage: bool = True
+    retry_order_send: int = 3
+
+@dataclass
+class TradingCostsCfg:
+    source: str = "static"
+    defaults: TradingCostsDefaultsCfg = field(default_factory=TradingCostsDefaultsCfg)
 
 @dataclass
 class FetchCfg:
@@ -170,12 +178,16 @@ class Cfg:
     risk: RiskCfg = field(default_factory=RiskCfg)
     logging: Dict[str, Any] = field(default_factory=dict)
     watchdog: WatchdogCfg = field(default_factory=WatchdogCfg)
-    reoptimization_triggers: ReoptimizationTriggersCfg = field(default_factory=ReoptimizationTriggersCfg)
     monitoring: MonitoringCfg = field(default_factory=MonitoringCfg)
     thompson_sampling: ThompsonSamplingCfg = field(default_factory=ThompsonSamplingCfg)
+    trading_costs: TradingCostsCfg = field(default_factory=TradingCostsCfg)
     fetch: FetchCfg = field(default_factory=FetchCfg)
     min_samples_for_ensemble: int = 1000
     force_retrain_on_startup: bool = False # New: Force retraining of all models on bot startup
+    retraining_window_bars: Optional[int] = None # New: Number of recent bars for rolling window retraining
+    startup_logging: bool = True
+    magic_number: int = 424242
+    symbol_overrides: Dict[str, Dict[str, Any]] = field(default_factory=dict)
 
     def timeframe_seconds(self) -> Optional[int]:
         """ Convert timeframe string like 'M5', 'H1', 'D1' to seconds.
@@ -255,14 +267,6 @@ class Cfg:
             logger.warning(f"Invalid watchdog config in YAML: {e}; using defaults.")
             watchdog_obj = WatchdogCfg()
 
-        # parse reoptimization_triggers block if present
-        try:
-            reopt_raw = raw.get("reoptimization_triggers", {}) or {}
-            reopt_obj = ReoptimizationTriggersCfg(**reopt_raw) if reopt_raw else ReoptimizationTriggersCfg()
-        except Exception as e:
-            logger.warning(f"Invalid reoptimization_triggers config in YAML: {e}; using defaults.")
-            reopt_obj = ReoptimizationTriggersCfg()
-
         # parse monitoring block if present
         try:
             mon_raw = raw.get("monitoring", {}) or {}
@@ -274,6 +278,8 @@ class Cfg:
         # parse fetch block if present (bootstrap + local caching)
         try:
             fetch_raw = raw.get("fetch", {}) or {}
+            if not fetch_raw.get("retrain_time_utc"):
+                logger.warning("Could not find a valid `retrain_time_utc` in config.yaml; falling back to `retrain_every_bars`.")
             fetch_obj = FetchCfg(**fetch_raw) if fetch_raw else FetchCfg()
         except Exception as e:
             logger.warning(f"Invalid fetch config in YAML: {e}; using defaults.")
@@ -286,6 +292,19 @@ class Cfg:
         except Exception as e:
             logger.warning(f"Invalid thompson_sampling config in YAML: {e}; using defaults.")
             ts_obj = ThompsonSamplingCfg()
+
+        # parse trading_costs block if present
+        try:
+            tc_raw = raw.get("trading_costs", {}) or {}
+            defaults_raw = tc_raw.get("defaults", {}) or {}
+            defaults_obj = TradingCostsDefaultsCfg(**defaults_raw)
+            tc_obj = TradingCostsCfg(
+                source=tc_raw.get("source", "static"),
+                defaults=defaults_obj
+            )
+        except Exception as e:
+            logger.warning(f"Invalid trading_costs config in YAML: {e}; using defaults.")
+            tc_obj = TradingCostsCfg()
 
         return Cfg(
             symbols=raw.get("symbols", ["EURUSD"]),
@@ -307,10 +326,14 @@ class Cfg:
             risk=risk_obj,
             logging=raw.get("logging", {}),
             watchdog=watchdog_obj,
-            reoptimization_triggers=reopt_obj,
             monitoring=mon_obj,
-            thompson_sampling=ts_obj,
             fetch=fetch_obj,
+            thompson_sampling=ts_obj,
+            trading_costs=tc_obj,
             min_samples_for_ensemble=int(raw.get("min_samples_for_ensemble", 1000)),
             force_retrain_on_startup=bool(raw.get("force_retrain_on_startup", False)),
+            retraining_window_bars=raw.get("retraining_window_bars", None),
+            startup_logging=bool(raw.get("startup_logging", True)),
+            magic_number=int(raw.get("magic_number", 424242)),
+            symbol_overrides=raw.get("symbol_overrides", {}),
         )

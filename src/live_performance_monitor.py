@@ -37,7 +37,7 @@ class LivePerformanceMonitor:
         self.peak_equity = max(self.peak_equity, new_equity)
 
         # Trim equity_curve to lookback_days
-        min_timestamp = timestamp - datetime.timedelta(days=self.cfg.reoptimization_triggers.lookback_days)
+        min_timestamp = timestamp - datetime.timedelta(days=self.cfg.monitoring.lookback_days)
         while self.equity_curve and self.equity_curve[0][0] < min_timestamp:
             self.equity_curve.popleft()
 
@@ -45,103 +45,12 @@ class LivePerformanceMonitor:
         self.closed_trades.append(trade)
 
         # Trim closed_trades to lookback_days
-        min_timestamp = datetime.datetime.now(datetime.timezone.utc) - datetime.timedelta(days=self.cfg.reoptimization_triggers.lookback_days)
+        min_timestamp = datetime.datetime.now(datetime.timezone.utc) - datetime.timedelta(days=self.cfg.monitoring.lookback_days)
         while self.closed_trades and self.closed_trades[0].exit_time < min_timestamp:
             self.closed_trades.popleft()
 
     def update_ensemble_auc(self, auc: float):
         self.last_ensemble_auc = auc
-
-    def _calculate_performance_metrics(self) -> dict:
-        metrics = {
-            "sharpe_ratio": 0.0,
-            "max_drawdown": 0.0,
-            "profit_factor": 0.0,
-            "win_rate": 0.0,
-            "avg_ensemble_auc": self.last_ensemble_auc # Start with last reported AUC
-        }
-
-        # Filter trades and equity curve for the lookback period
-        now_utc = datetime.datetime.now(datetime.timezone.utc)
-        lookback_start_time = now_utc - datetime.timedelta(days=self.cfg.reoptimization_triggers.lookback_days)
-
-        recent_trades = [t for t in self.closed_trades if t.exit_time and t.exit_time >= lookback_start_time]
-        recent_equity_data = [eq for ts, eq in self.equity_curve if ts >= lookback_start_time]
-
-        if not recent_equity_data:
-            return metrics # Not enough data yet
-
-        # Calculate Sharpe Ratio
-        eq_series = pd.Series(recent_equity_data)
-        returns = eq_series.pct_change().dropna()
-        if not returns.empty and returns.std() != 0:
-            timeframe_minutes = self.cfg.timeframe_minutes()
-            annualization_factor = np.sqrt(252 * (24 * 60 / timeframe_minutes)) if timeframe_minutes else 1.0
-            metrics["sharpe_ratio"] = returns.mean() / returns.std() * annualization_factor
-        
-        # Calculate Max Drawdown
-        if len(recent_equity_data) > 1:
-            peak = eq_series.expanding(min_periods=1).max()
-            drawdown = (eq_series - peak) / peak
-            metrics["max_drawdown"] = abs(drawdown.min())
-
-        if recent_trades:
-            # Calculate Profit Factor and Win Rate
-            total_profit = sum(t.pnl for t in recent_trades if t.pnl > 0)
-            total_loss = abs(sum(t.pnl for t in recent_trades if t.pnl < 0))
-            if total_loss > 0:
-                metrics["profit_factor"] = total_profit / total_loss
-            else:
-                metrics["profit_factor"] = float('inf') if total_profit > 0 else 0.0
-
-            winning_trades = sum(1 for t in recent_trades if t.pnl > 0)
-            metrics["win_rate"] = winning_trades / len(recent_trades)
-
-        return metrics
-
-    def check_for_reoptimization_trigger(self, current_timestamp: datetime.datetime) -> Tuple[bool, List[str]]:
-        if not self.cfg.reoptimization_triggers.enabled:
-            return False, []
-
-        if self.last_check_time is None:
-            self.last_check_time = current_timestamp
-            return False, []
-
-        # Only check if enough time has passed
-        if (current_timestamp - self.last_check_time).total_seconds() / 60 < self.cfg.reoptimization_triggers.check_interval_minutes:
-            return False, []
-
-        self.last_check_time = current_timestamp # Update last check time
-
-        metrics = self._calculate_performance_metrics()
-        logger.info(f"Performance check (last {self.cfg.reoptimization_triggers.lookback_days} days): "
-                    f"Sharpe={metrics['sharpe_ratio']:.2f}, Drawdown={metrics['max_drawdown']:.2%}, "
-                    f"WinRate={metrics['win_rate']:.2%}, AUC={metrics['avg_ensemble_auc']:.2f}")
-
-        triggered = False
-        reasons = []
-
-        if metrics["sharpe_ratio"] < self.cfg.reoptimization_triggers.min_sharpe_ratio:
-            triggered = True
-            reasons.append(f"Sharpe Ratio ({metrics['sharpe_ratio']:.2f}) below threshold ({self.cfg.reoptimization_triggers.min_sharpe_ratio:.2f})")
-        
-        if metrics["max_drawdown"] > self.cfg.reoptimization_triggers.max_drawdown_percent:
-            triggered = True
-            reasons.append(f"Max Drawdown ({metrics['max_drawdown']:.2%}) exceeds threshold ({self.cfg.reoptimization_triggers.max_drawdown_percent:.2%})")
-
-        if metrics["avg_ensemble_auc"] < self.cfg.reoptimization_triggers.min_ensemble_auc:
-            triggered = True
-            reasons.append(f"Average Ensemble AUC ({metrics['avg_ensemble_auc']:.2f}) below threshold ({self.cfg.reoptimization_triggers.min_ensemble_auc:.2f})")
-
-        if triggered:
-            logger.critical(f"RE-OPTIMIZATION TRIGGERED! Reasons: {'; '.join(reasons)}")
-            # Here you would add logic to:
-            # 1. Set a persistent flag (e.g., write to a file)
-            # 2. Send a notification (email, Telegram, etc.)
-            # 3. Potentially pause trading in main.py
-            return True, reasons
-        
-        return False, []
 
     def save_state(self):
         state_path = self.cfg.monitoring.monitor_state_file

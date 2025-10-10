@@ -2,6 +2,7 @@
 
 # --- General Settings ---
 use_gpu: false # Master switch to enable GPU acceleration for supported models (lgbm, xgb)
+magic_number: 424242 # Unique ID for this bot's trades
 data_source: mt5 # "mt5" or "csv". Automatically switches to csv on non-windows
 
 # --- Optuna Tuning Specifics ---
@@ -37,9 +38,10 @@ ensemble_training:
 # historical_data symbols for .csv needed: M5-EURUSD#, H1-EURUSD#, and M5-USDX-DEC25
 symbols: ["EURUSD#", "GBPUSD#", "USDJPY#"] #"EURUSD#", "GBPUSD#", "USDJPY#", "USDX-DEC25"
 timeframe: "M5"            # One of: M1, M5, M15, M30, H1, H4
-history_bars: 36000          #20000 rolling window for retraining #6048 18000 36000 105,000
+history_bars: 36000          #6048 18000 36000 105,000
 retrain_every_bars: 1000     # ~3.5 days at M5
 prediction_horizon: 6       # 6 Bars ahead for label (~30 min on M5)
+retraining_window_bars: 20000         # Number of recent bars for rolling window retraining. null for expanding window.
 
 # --- Features (now tunable) ---
 features:
@@ -172,8 +174,8 @@ risk:
   atr_multiplier_tp: 2.5
   breakeven_at_1R: true
   trailing_atr_mult: 1.0
-  min_prob_long: 0.62 #0.55
-  min_prob_short: 0.62  #0.55
+  min_prob_long: 0.55
+  min_prob_short: 0.55
   block_on_drawdown: 1.0         # 0.1 pause if drawdown from equity peak exceeds 10%     #disable 1.0
   min_auc_improvement: 0.005     # 0.005 default # minimum improvement in AUC to accept a new model
   max_drawdown_for_pruning: 1.0 # New: Max drawdown allowed before Optuna trial pruning  #disable 1.0
@@ -190,26 +192,25 @@ logging:
   rotate: 10 MB
   retention: 7 days
 
-# --- Re-optimization Triggers ---
-reoptimization_triggers:
-  enabled: true
-  check_interval_minutes: 60 # How often to check performance triggers
-  lookback_days: 30          # Period over which to calculate performance metrics
-  min_sharpe_ratio: 0.5      # If live Sharpe drops below this, trigger re-opt
-  max_drawdown_percent: 0.20 # If live drawdown exceeds this, trigger re-opt
-  min_ensemble_auc: 0.55     # If average ensemble AUC drops below this, trigger re-opt
-
 # --- Monitoring / Safety ---
 watchdog:
-  max_consecutive_losses: 0      # 5 Stop trading if more than N losses in a row    #disable 0
-  cooldown_hours: 0.0              # 1 Pause trading for X hours if triggered       #disable 0.0
+  enabled: false
+  max_consecutive_losses: 5      # 5 Stop trading if more than N losses in a row
+  cooldown_hours: 1              # 1 Pause trading for X hours if triggered
 
 # --- Monitoring ---
 monitoring:
+  lookback_days: 30 # Period over which to calculate performance metrics
   monitor_state_file: "monitor_state.json" # File to save LivePerformanceMonitor state
   telegram_bot_token: "" # Your Telegram Bot Token
   telegram_chat_id: "" # Your Telegram Chat ID (can be negative for groups)
 
 # --- Misc / Transparency ---
 startup_logging: true             # log key settings at bot launch for transparency
-force_retrain_on_startup: false    # Set to true to force retraining of all models on bot startup (e.g., after feature changes)
+force_retrain_on_startup: false    # Set to true to force retraining of all models on bot startup (e.g., after feature changes).
+
+# --- Symbol Specific Overrides ---
+# Use this section to override settings for specific symbols, like pip_value for non-forex instruments.
+symbol_overrides:
+  "USDX-DEC25":
+    pip_value: 0.1 # Example: Override pip_value for an index

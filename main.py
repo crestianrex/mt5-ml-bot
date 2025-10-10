@@ -110,7 +110,7 @@ def run_retraining_in_background(cfg, sym, feature_cfg, dry_run, notifier):
     try:
         # Use DataManager's cached loader (avoids double work and ensures consistent caching)
         data_manager = DataManager(cfg)
-        full_data, full_X, full_y = data_manager.load_cached(sym, feature_cfg, full=True)
+        full_data, full_X, full_y = data_manager.load_cached(sym, feature_cfg, count=cfg.retraining_window_bars)
 
         if full_X.empty or full_y.empty:
             message = f"[{sym}] <b>WARNING:</b> No data for retraining, background process exiting."
@@ -126,10 +126,54 @@ def run_retraining_in_background(cfg, sym, feature_cfg, dry_run, notifier):
         logger.exception(f"[{sym}] Background retraining process failed: {e}")
 
 
+def log_startup_summary(cfg: Cfg):
+    """ Logs a summary of key configuration settings at startup. """
+    logger.info("--- Bot Configuration Summary ---")
+    logger.info(f"Symbols: {cfg.symbols}")
+    logger.info(f"Timeframe: {cfg.timeframe}")
+    logger.info(f"Data Source: {cfg.data_source}")
+    logger.info(f"GPU Enabled: {cfg.use_gpu}")
+
+    # Retraining settings
+    if cfg.fetch.retrain_time_utc:
+        logger.info(f"Retraining Schedule: Daily at {cfg.fetch.retrain_time_utc} UTC")
+    else:
+        logger.info(f"Retraining Schedule: Every {cfg.retrain_every_bars} bars")
+    
+    if cfg.retraining_window_bars:
+        logger.info(f"Retraining Window: Rolling {cfg.retraining_window_bars} bars")
+    else:
+        logger.info("Retraining Window: Expanding")
+
+    # Risk and Ensemble settings
+    logger.info(f"Max Portfolio Risk: {cfg.risk.max_portfolio_risk}")
+    logger.info(f"Drawdown Block Limit: {cfg.risk.block_on_drawdown}")
+    
+    ensemble_cfg = getattr(cfg, 'ensemble', {})
+    logger.info(f"Ensemble Method: {ensemble_cfg.get('method', 'soft_vote') if isinstance(ensemble_cfg, dict) else 'N/A'}")
+    logger.info(f"Auto-Threshold Enabled: {ensemble_cfg.get('auto_threshold', False) if isinstance(ensemble_cfg, dict) else 'N/A'}")
+    
+    # Thompson Sampling settings
+    ts_cfg = getattr(cfg, 'thompson_sampling', None)
+    if ts_cfg:
+        logger.info(f"Thompson Sampling Enabled: {ts_cfg.enabled}")
+        if ts_cfg.enabled:
+            logger.info(f"  - Contextual Bandit: {ts_cfg.contextual_enabled}")
+            logger.info(f"  - Adaptive Grids: {ts_cfg.adaptive_grids_enabled}")
+            logger.info(f"  - Bandit Reset: {ts_cfg.bandit_reset_enabled}")
+    else:
+        logger.info("Thompson Sampling Enabled: N/A")
+
+    logger.info("---------------------------------")
+
+
 def run(dry_run: bool = False):
     """ Production-ready main loop for hybrid adaptive MT5 ML bot. """
     cfg = Cfg.from_yaml("config.yaml")
     cfg.dashboard_every_bars = getattr(cfg, "dashboard_every_bars", 1)
+
+    if cfg.startup_logging:
+        log_startup_summary(cfg)
 
     logger.info("=== Starting MT5 ML Bot (Hybrid Adaptive) ===")
     logger.info(f"Dry-run mode: {dry_run}")
@@ -221,10 +265,20 @@ def run(dry_run: bool = False):
     retraining_status = {sym: False for sym in cfg.symbols} # NEW: Track if retraining is active
     trading_blocked_by_low_new_model_auc = {sym: False for sym in cfg.symbols} # NEW: Track if trading is blocked due to low new model AUC
     last_diagnostics_log_time = 0.0 # NEW: For throttling diagnostics logging
+    last_retrain_date = None # NEW: Track last retraining date
 
     try:
         while True:
             current_loop_time = time.time() # NEW: Capture current time for throttling
+
+            # --- Scheduled Retraining Check ---
+            time_to_retrain_today = False
+            now_utc = datetime.datetime.now(datetime.timezone.utc)
+            if cfg.fetch.retrain_time_utc and (last_retrain_date is None or last_retrain_date < now_utc.date()):
+                retrain_hour, retrain_minute = map(int, cfg.fetch.retrain_time_utc.split(':'))
+                if now_utc.hour > retrain_hour or (now_utc.hour == retrain_hour and now_utc.minute >= retrain_minute):
+                    time_to_retrain_today = True
+                    last_retrain_date = now_utc.date()
 
             # refresh account info once per loop
             account_info = mt5.account_info()
@@ -312,10 +366,17 @@ def run(dry_run: bool = False):
                     # Delta append new bars to cache (atomic write)
                     data_manager.append_new_bars(sym, data)
 
-                    # --- Safe Incremental Retraining (now in background) ---
-                    if bar_counters[sym] % cfg.retrain_every_bars == 0:
+                    # --- Conditional Retraining Logic ---
+                    should_retrain = False
+                    if time_to_retrain_today:
+                        should_retrain = True
+                    elif not cfg.fetch.retrain_time_utc:  # Fallback to bar count if time-based is disabled
+                        if bar_counters[sym] > 0 and bar_counters[sym] % cfg.retrain_every_bars == 0:
+                            should_retrain = True
+                    
+                    if should_retrain:
                         if sym not in retraining_processes:
-                            logger.info(f"[{sym}] Triggering safe retraining in background.")
+                            logger.info(f"[{sym}] Triggering retraining (time-based: {time_to_retrain_today}).")
                             notifier.send_message(f"[{sym}] Retraining started.", level="INFO")
                             p = Process(target=run_retraining_in_background, args=(cfg, sym, feature_cfg, dry_run, notifier))
                             p.start()
@@ -392,8 +453,19 @@ def run(dry_run: bool = False):
 
                     if ens_per_symbol[sym].best_threshold_ is not None:
                         threshold = ens_per_symbol[sym].best_threshold_
-                        direction = "long" if prob_up >= threshold else "short"
+                        
+                        # Corrected logic with a no-trade "dead zone"
+                        if prob_up >= threshold:
+                            direction = "long"
+                        elif prob_up <= (1 - threshold):
+                            direction = "short"
+                        else:
+                            direction = None
+                        
+                        # Original (buggy) logic - trades on every bar. Uncomment to test.
+                        # direction = "long" if prob_up >= threshold else "short"
                     else:
+                        # Fallback logic if no auto-threshold is found
                         direction = "long" if prob_up >= min_prob_long else "short" if (1 - prob_up) >= min_prob_short else None
 
                     if direction:
@@ -451,8 +523,8 @@ def run(dry_run: bool = False):
             # --- Live Dashboard (throttled) ---
             print_dashboard(cfg, risk, ens_per_symbol, X_per_symbol, bar_counter=sum(bar_counters.values()))
 
-            # time.sleep(cfg.timeframe_seconds() or 60)
-            time.sleep(60)
+            time.sleep(cfg.timeframe_seconds() or 60)
+            # time.sleep(60)
 
     except KeyboardInterrupt:
         logger.info("=== Stopping MT5 ML Bot ===")

@@ -11,6 +11,8 @@ from loguru import logger
 from sklearn.metrics import roc_auc_score, f1_score, precision_score, recall_score
 from sklearn.model_selection import TimeSeriesSplit
 from collections import defaultdict
+from dataclasses import asdict
+from .config import TradingCostsDefaultsCfg
 
 
 def custom_pnl(
@@ -200,7 +202,9 @@ class Ensemble:
         self.flat_mode: bool = bool(self.cfg.ensemble.get("flat_mode", False))
         self.threshold_metric: str = self.cfg.ensemble.get("threshold_metric", "custom_pnl")
         self.threshold_grid: str | float | List[float] = self.cfg.ensemble.get("threshold_grid", "auto")
-        self.trading_costs = getattr(self.cfg, "trading_costs", {}).get("defaults", {})
+        self.auto_threshold: bool = self.cfg.ensemble.get("auto_threshold", False)
+        defaults_cfg = getattr(self.cfg.trading_costs, "defaults", TradingCostsDefaultsCfg())
+        self.trading_costs = asdict(defaults_cfg)
 
         self._stacker = None
         self._meta_calibrator: Optional[IsotonicRegression] = None
@@ -429,8 +433,8 @@ class Ensemble:
 
             logger.info(f"Ensemble CV AUC: {self.ensemble_cv_auc_:.4f}")
 
-            # threshold optimization if prices aligned
-            if prices_c is not None:
+            # threshold optimization if prices aligned and auto_threshold is enabled
+            if self.auto_threshold and prices_c is not None:
                 try:
                     # use last len(y_oof) prices
                     price_segment = prices_c.iloc[-len(y_oof):]

@@ -43,7 +43,7 @@ class RiskManager:
         return float(val)
 
     # ---------- Position sizing ----------
-    def position_size(self, equity: float, atr: float, pip_value: float, pip_size: float, auc_score: float, total_open_risk: float = 0.0) -> float:
+    def position_size(self, equity: float, atr: float, pip_value: float, pip_size: float, auc_score: float, spread_value: float, total_open_risk: float = 0.0) -> float:
         # dynamic risk fraction per trade
         risk_per_trade = self._get_dynamic_value(self.risk_cfg.dynamic_risk, auc_score, getattr(self.risk_cfg, "risk_per_trade", 0.005))
         max_risk_allowed = max(0.0, float(self.risk_cfg.max_portfolio_risk) - float(total_open_risk))
@@ -51,7 +51,9 @@ class RiskManager:
         # absolute $ amount to risk
         risk_amt = float(equity) * float(effective_risk)
 
-        sl_distance = float(self.risk_cfg.atr_multiplier_sl) * float(atr)
+        sl_distance_atr = float(self.risk_cfg.atr_multiplier_sl) * float(atr)
+        sl_distance = sl_distance_atr + spread_value
+
         if sl_distance <= 0 or (pip_value is None) or pip_value <= 0:
             logger.warning("Invalid SL distance or pip_value when computing position size")
             return 0.0
@@ -167,41 +169,43 @@ class RiskManager:
         Returns True if trading is allowed.
         This function now enforces:
         - equity drawdown block (block_on_drawdown)
-        - watchdog consecutive losses/cooldown
+        - watchdog consecutive losses/cooldown (if enabled)
         - session filter
         """
 
-        # 1) cooldown check (highest priority)
-        if self.cooldown_active():
-            logger.info(f"Trading blocked: watchdog cooldown active until {self.cooldown_until.isoformat()}")
-            return False
+        # 1) Watchdog checks (if enabled)
+        if self.watchdog_cfg.enabled:
+            # Cooldown check (highest priority)
+            if self.cooldown_active():
+                logger.info(f"Trading blocked: watchdog cooldown active until {self.cooldown_until.isoformat()}")
+                return False
 
-        # 2) drawdown check (based on cfg.block_on_drawdown)
-        # we'll also update equity peak if current equity available via mt5.account_info()
+            # Consecutive losses check
+            max_losses = getattr(self.watchdog_cfg, "max_consecutive_losses", None)
+            if max_losses is not None and max_losses > 0:
+                lost = self._count_consecutive_losses()
+                if lost >= max_losses:
+                    message = f"<b>RISK ALERT:</b> Watchdog: consecutive losses {lost} >= threshold {max_losses}. Triggering cooldown."
+                    logger.warning(message)
+                    if self.notifier: self.notifier.send_message(message, level="WARNING")
+                    self._trigger_cooldown()
+                    return False
+
+        # 2) Drawdown check (based on cfg.block_on_drawdown)
         try:
             acct = mt5.account_info()
             if acct:
                 equity = float(getattr(acct, "equity", 0.0))
                 self._update_equity_peak(equity)
                 if self._drawdown_exceeded(equity):
-                    # trigger cooldown
-                    self._trigger_cooldown()
+                    # Trigger cooldown only if watchdog is also enabled
+                    if self.watchdog_cfg.enabled:
+                        self._trigger_cooldown()
                     return False
         except Exception:
             logger.debug("should_trade: account_info() unavailable for drawdown checks")
 
-        # 3) check watchdog: consecutive losses
-        max_losses = getattr(self.watchdog_cfg, "max_consecutive_losses", None)
-        if max_losses is not None and max_losses > 0:
-            lost = self._count_consecutive_losses()
-            if lost >= max_losses:
-                message = f"<b>RISK ALERT:</b> Watchdog: consecutive losses {lost} >= threshold {max_losses}. Triggering cooldown."
-                logger.warning(message)
-                if self.notifier: self.notifier.send_message(message, level="WARNING")
-                self._trigger_cooldown()
-                return False
-
-        # 4) session filter
+        # 3) Session filter
         sess = self.risk_cfg.session_filter
         if sess:
             try:
@@ -215,7 +219,7 @@ class RiskManager:
                 logger.warning("Invalid session_filter in config; allowing trades by default.")
                 return True
 
-        # 5) block on drawdown parameter (if provided separately)
+        # 4) Block on drawdown parameter (if provided separately)
         if drawdown >= getattr(self.risk_cfg, "block_on_drawdown", 0.10):
             message = f"<b>RISK ALERT:</b> Trading blocked: drawdown {drawdown:.3f} >= {self.risk_cfg.block_on_drawdown}"
             logger.info(message)

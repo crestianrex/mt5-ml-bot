@@ -151,8 +151,7 @@ class DataManager:
         X, y = self._build_features_and_labels(data, feature_cfg, symbol)
         return data, X, y
 
-    def load_cached(self, symbol: str, feature_cfg: FeatureConfig, full: bool = False) -> Tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame]:
-        count = None if full else self.cfg.history_bars
+    def load_cached(self, symbol: str, feature_cfg: FeatureConfig, count: Optional[int] = None) -> Tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame]:
         data = self.load_local_history(symbol, self.cfg.timeframe, count=count)
         if data.empty:
             return pd.DataFrame(), pd.DataFrame(), pd.DataFrame()

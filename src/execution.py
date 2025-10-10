@@ -106,9 +106,10 @@ class Execution:
             logger.exception(f"Failed to reconcile open positions with MT5: {e}")
             if self.notifier: self.notifier.send_message(f"<b>ERROR:</b> Failed to reconcile open positions with MT5: {e}", level="ERROR")
 
-    def _send_order_with_retry(self, request: dict, retries: int = 3, delay: float = 1.0):
+    def _send_order_with_retry(self, request: dict, retries: int = -1, delay: float = 1.0):
+        num_retries = self.risk.cfg.trading_costs.defaults.retry_order_send if retries == -1 else retries
         last = None
-        for attempt in range(1, retries + 1):
+        for attempt in range(1, num_retries + 1):
             try:
                 result = mt5.order_send(request)
                 last = result
@@ -248,22 +249,36 @@ class Execution:
             if self.notifier: self.notifier.send_message(f"<b>ERROR:</b> Symbol info unavailable for {symbol}.", level="ERROR")
             return OrderResult(False, None, "Symbol info unavailable")
 
-        pip_size = getattr(symbol_info, "point", None)
-        contract_size = getattr(symbol_info, "trade_contract_size", 1.0)
-        # Basic pip value assumption: pip_value = point * contract_size * lot_size(1) -- warn if unexpected
-        pip_value = pip_size * contract_size if pip_size and contract_size else None
-        if pip_value is None or pip_value <= 0:
-            logger.warning(f"[{symbol}] pip_value computed suspiciously: pip_size={pip_size}, contract_size={contract_size}")
-            pip_value = max(1e-6, float(pip_size or 1e-6))
+        pip_value = None
+        # 1. Check for symbol override in config
+        if symbol in self.risk.cfg.symbol_overrides and "pip_value" in self.risk.cfg.symbol_overrides[symbol]:
+            pip_value = self.risk.cfg.symbol_overrides[symbol]["pip_value"]
+            logger.info(f"[{symbol}] Using configured override pip_value: {pip_value}")
 
-        lots = self.risk.position_size(equity, atr, pip_value, pip_size, auc_score, total_open_risk)
-        if lots <= 0:
-            return OrderResult(False, None, "Lots <= 0")
+        # 2. If no override, try to calculate it
+        if pip_value is None:
+            pip_size = getattr(symbol_info, "point", None)
+            contract_size = getattr(symbol_info, "trade_contract_size", 1.0)
+            if pip_size and contract_size:
+                pip_value = pip_size * contract_size
+        
+        # 3. Final check and fail-safe
+        if pip_value is None or pip_value <= 0:
+            error_msg = f"CRITICAL: Could not determine pip_value for {symbol}. Cannot calculate position size. Please set it in config.yaml under symbol_overrides."
+            logger.critical(error_msg)
+            if self.notifier: self.notifier.send_message(error_msg, level="CRITICAL")
+            return OrderResult(False, None, "Invalid pip_value")
 
         tick = mt5.symbol_info_tick(symbol)
         if not tick:
             if self.notifier: self.notifier.send_message(f"<b>ERROR:</b> Tick info unavailable for {symbol}.", level="ERROR")
             return OrderResult(False, None, "Tick info unavailable")
+        spread_value = float(tick.ask) - float(tick.bid)
+
+        lots = self.risk.position_size(equity, atr, pip_value, pip_size, auc_score, spread_value, total_open_risk)
+        if lots <= 0:
+            return OrderResult(False, None, "Lots <= 0")
+
         price = float(tick.ask) if direction == "long" else float(tick.bid)
 
         sl, tp = self.risk.stop_targets(price=price, atr=atr, direction=direction, auc_score=auc_score, symbol=symbol, sl_mult=sl_mult, tp_mult=tp_mult)
@@ -280,7 +295,7 @@ class Execution:
             "sl": float(sl),
             "tp": float(tp),
             "deviation": deviation,
-            "magic": 424242,
+            "magic": self.risk.cfg.magic_number,
             "comment": "ml-bot",
             "type_time": mt5.ORDER_TIME_GTC,
             "type_filling": mt5.ORDER_FILLING_IOC,
