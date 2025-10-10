@@ -7,7 +7,7 @@ from .config import Cfg
 import datetime
 from datetime import timezone, timedelta
 from typing import List, Optional # Import Optional
-from backtester import SimPosition # Import SimPosition
+from .trade import SimPosition # Import SimPosition
 from .notifier import TelegramNotifier # NEW import
 
 class RiskManager:
@@ -27,13 +27,6 @@ class RiskManager:
         self.cooldown_until: datetime.datetime | None = None
         self.recently_closed_trades: List[SimPosition] = [] # New: To store closed trades for monitoring
         self.notifier = notifier # NEW
-        self.cfg = cfg
-        self.risk_cfg = cfg.risk
-        self.watchdog_cfg = cfg.watchdog
-        self.equity_peak: float | None = None
-        self.open_positions_cache: dict[str, dict] = {}
-        self.cooldown_until: datetime.datetime | None = None
-        self.recently_closed_trades: List[SimPosition] = [] # New: To store closed trades for monitoring
 
     # ---------- Dynamic value helpers ----------
     def _get_dynamic_value(self, dynamic_cfg: dict | None, auc_score: float, default_val: float) -> float:
@@ -82,17 +75,17 @@ class RiskManager:
         return round(lots, 2)
 
     # ---------- SL / TP ----------
-    def stop_targets(self, price: float, atr: float, direction: str, auc_score: float, symbol: str):
-        sl_mult = float(self.risk_cfg.atr_multiplier_sl)
-        tp_mult = float(self._get_dynamic_value(self.risk_cfg.dynamic_tp, auc_score, float(self.risk_cfg.atr_multiplier_tp)))
+    def stop_targets(self, price: float, atr: float, direction: str, auc_score: float, symbol: str, sl_mult: float | None = None, tp_mult: float | float | None = None):
+        _sl_mult = sl_mult if sl_mult is not None else float(self.risk_cfg.atr_multiplier_sl)
+        _tp_mult = tp_mult if tp_mult is not None else float(self._get_dynamic_value(self.risk_cfg.dynamic_tp, auc_score, float(self.risk_cfg.atr_multiplier_tp)))
         price = float(price)
         atr = float(atr)
         if direction == "long":
-            sl = price - sl_mult * atr
-            tp = price + tp_mult * atr
+            sl = price - _sl_mult * atr
+            tp = price + _tp_mult * atr
         else:
-            sl = price + sl_mult * atr
-            tp = price - tp_mult * atr
+            sl = price + _sl_mult * atr
+            tp = price - _tp_mult * atr
         logger.debug(f"Stop targets: dir={direction}, price={price:.6f}, SL={sl:.6f}, TP={tp:.6f}")
         return float(sl), float(tp)
 

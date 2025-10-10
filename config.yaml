@@ -2,10 +2,14 @@
 
 # --- General Settings ---
 use_gpu: false # Master switch to enable GPU acceleration for supported models (lgbm, xgb)
-data_source: csv # "mt5" or "csv". Automatically switches to csv on non-windows
+data_source: mt5 # "mt5" or "csv". Automatically switches to csv on non-windows
 
 # --- Optuna Tuning Specifics ---
 optuna_n_trials: 150  # 150
+
+# --- Backtesting Settings ---
+initial_equity: 100.0
+
 optuna_pruning_interval: 100 # New: Interval for Optuna pruning checks
 n_jobs: -1 # Number of parallel jobs for tuning. -1 means all available CPU cores.
 roc_lags_options:
@@ -15,14 +19,26 @@ roc_lags_options:
   - [1, 2, 3]
 
 # --- ML & CV Settings ---
-cv_samples_per_split: 300 # Affects number of splits in TimeSeriesSplit. Higher -> fewer splits -> faster but less robust CV.
+cv_samples_per_split: 1000 # Affects number of splits in TimeSeriesSplit. Higher -> fewer splits -> faster but less robust CV.
+
+# --- Fetch / Data Management ---
+fetch:
+  initial_fetch_bars: 36000        # 30000 how many bars to bootstrap at startup / initial fetch
+  save_raw_data_locally: true      # store raw CSV/feather parquet locally for caching
+  raw_data_dir: "data/historical_data" # where to store cached data
+  retrain_in_background: true      # whether retrain runs async
+  retrain_time_utc: "23:55"           #null set to "23:55" if you want scheduled daily retrain, null = disabled
+
+# --- Ensemble Training Control ---
+ensemble_training:
+  min_samples_for_ensemble: 1000   # don’t fit ensemble if fewer samples available
 
 # --- Symbols & timeframe ---
 # historical_data symbols for .csv needed: M5-EURUSD#, H1-EURUSD#, and M5-USDX-DEC25
-symbols: ["USDJPY#"] #"EURUSD#", "GBPUSD#", "USDJPY#", "USDX-DEC25"
+symbols: ["EURUSD#", "GBPUSD#", "USDJPY#"] #"EURUSD#", "GBPUSD#", "USDJPY#", "USDX-DEC25"
 timeframe: "M5"            # One of: M1, M5, M15, M30, H1, H4
-history_bars: 36000          # How many bars to pull when (re)starting #6048 18000 36000  105,000 bars (for one year of M5 data)
-retrain_every_bars: 250     # Incremental retrain every N bars
+history_bars: 36000          #20000 rolling window for retraining #6048 18000 36000 105,000
+retrain_every_bars: 1000     # ~3.5 days at M5
 prediction_horizon: 6       # 6 Bars ahead for label (~30 min on M5)
 
 # --- Features (now tunable) ---
@@ -37,12 +53,12 @@ features:
 # --- Context Features (static, not tuned by optuna) ---
 context_features:
   mta:
-    enabled: true
+    enabled: false
     timeframe: "H1"
     ema_period: 50
     rsi_period: 14
   inter_market:
-    enabled: true
+    enabled: false
     symbol: "USDX-DEC25" # Make sure this symbol is available in your data source
     roc_lags: [5, 21, 63]
   price_action:
@@ -84,7 +100,7 @@ ensemble:
   method: soft_vote
   threshold_metric: sharpe_ratio # custom_pnl # sharpe_ratio
   threshold_grid: auto
-  min_ensemble_auc: 0.55        # Minimum AUC required to allow trading
+  min_ensemble_auc: 0.58        # 0.55 Minimum AUC required to allow trading
   auto_threshold: true           # Auto-adjust thresholds based on historical PnL
 
 # --- Trading costs & execution ---
@@ -98,6 +114,41 @@ trading_costs:
     pip_value: 0.0001
     adaptive_slippage: true        # dynamically calculate slippage based on recent spread
     retry_order_send: 3            # number of retries for failed order sends
+
+# --- Thompson Sampling Configuration ---
+thompson_sampling:
+  enabled: true
+  atr_grid: [0.6, 0.8, 1.0, 1.25, 1.5, 1.8, 2.0, 2.5, 3.0] # Discrete choices for ATR multiplier
+  min_prob_grid: [0.51, 0.52, 0.53, 0.54, 0.55, 0.56, 0.57, 0.58, 0.59, 0.60, 0.61, 0.62, 0.63, 0.64, 0.65, 0.66, 0.67, 0.68, 0.69, 0.70] # Discrete choices for min_prob
+  prior_mean: 0.0
+  prior_var: 1.0
+  obs_var: 1.0
+  decay: 0.995 # Forgetting factor for non-stationarity
+  reward_normalization_factor: 1000.0 # Divide PnL by this to normalize reward
+  rule_rolling_window: 100 # Bars for rolling volatility/returns
+  vol_threshold: 0.0005 # Example threshold for inverse_vol_scale
+  dd_cut_multiplier: 2.0 # Multiplier for max_drawdown in scaling
+  consec_loss_cut: 0.2 # Multiplier for consecutive losses in scaling
+  contextual_enabled: True           # Toggle contextual bandit
+  context_dim: 9                      # dim of context vector if contextual_enabled
+  min_visits_for_exploration: 5        # number of visits before arm is considered "known"
+  exploration_risk_mult: 0.5         # fraction of normal risk to use for exploratory arms
+  warmstart_weight: 1.0              # weight for warmstart merging (1.0 = fully add backtest priors)
+  state_file: "ts_risk_controller_state.json" # File to save RiskController state
+
+  # Adaptive Grid Configuration (for Dynamic Grid Adaptation)
+  adaptive_grids_enabled: true
+  adaptation_interval_updates: 500   # Number of updates to an arm before considering adaptation
+  adaptation_refinement_factor: 0.3  # How much to narrow the search space (e.g., 0.3 means 30% of current interval)
+  min_grid_size: 5                   # Minimum number of arms in a grid
+  max_grid_size: 20                  # Maximum number of arms in a grid
+
+  # Bandit Reset Configuration
+  bandit_reset_enabled: true
+  reset_on_drawdown_percent: 0.20    # Reset if equity drops X% from peak
+  reset_on_consecutive_losses: 10    # Reset if X consecutive losing trades
+  reset_on_low_ensemble_auc: 0.52    # Reset if ensemble AUC drops below this
+  reset_cooldown_hours: 24.0         # Cooldown period after a reset (in hours)
 
 # --- Risk management ---
 risk:
@@ -116,16 +167,16 @@ risk:
     auc_ceiling: 0.65      # Same AUC ceiling as risk
 
   max_positions: 3               # Max concurrent positions
-  max_portfolio_risk: 0.03       # Total equity risk cap
+  max_portfolio_risk: 1.00       #0.03 Total equity risk cap
   atr_multiplier_sl: 1.5
   atr_multiplier_tp: 2.5
   breakeven_at_1R: true
   trailing_atr_mult: 1.0
-  min_prob_long: 0.55
-  min_prob_short: 0.55
+  min_prob_long: 0.62 #0.55
+  min_prob_short: 0.62  #0.55
   block_on_drawdown: 1.0         # 0.1 pause if drawdown from equity peak exceeds 10%     #disable 1.0
   min_auc_improvement: 0.005     # 0.005 default # minimum improvement in AUC to accept a new model
-  max_drawdown_for_pruning: 1.0   # 0.40: Max drawdown allowed before Optuna trial pruning  #disable 1.0
+  max_drawdown_for_pruning: 1.0 # New: Max drawdown allowed before Optuna trial pruning  #disable 1.0
   session_filter:
     start: "00:00"
     end: "23:59"
@@ -156,8 +207,9 @@ watchdog:
 # --- Monitoring ---
 monitoring:
   monitor_state_file: "monitor_state.json" # File to save LivePerformanceMonitor state
-  telegram_bot_token: "8063675444:AAFloolk3KYXs0SGpGRwiCILGpH6c1q3ep4" # Your Telegram Bot Token
-  telegram_chat_id: "-4809426556" # Your Telegram Chat ID (can be negative for groups)
+  telegram_bot_token: "" # Your Telegram Bot Token
+  telegram_chat_id: "" # Your Telegram Chat ID (can be negative for groups)
 
 # --- Misc / Transparency ---
 startup_logging: true             # log key settings at bot launch for transparency
+force_retrain_on_startup: false    # Set to true to force retraining of all models on bot startup (e.g., after feature changes)

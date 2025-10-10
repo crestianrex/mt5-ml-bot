@@ -15,7 +15,8 @@ from typing import Optional
 
 from src.config import Cfg
 from src.features import FeatureConfig
-from src.utils import get_training_data, load_ensemble, save_ensemble, safe_retrain_ensemble, load_optuna_params
+from src.utils import load_ensemble, save_ensemble, safe_retrain_ensemble, load_optuna_params
+from src.data_manager import DataManager
 from src.ensemble import Ensemble
 
 # Safe retraining parameters
@@ -42,14 +43,10 @@ def retrain_symbol(cfg: Cfg, symbol: str, dry_run: bool = True) -> dict:
     feature_params = optuna_params.get('features', {})
     feature_cfg = FeatureConfig(**feature_params)
 
-    # fetch all available training data using the new centralized pipeline
-    data, X, y = get_training_data(
-        cfg, 
-        symbol, 
-        feature_cfg=feature_cfg, 
-        load_all_data=True, 
-        source=cfg.data_source if hasattr(cfg, "data_source") else "mt5"
-    )
+    # Use the modern DataManager to load all available training data
+    logger.info(f"[{symbol}] Loading full history via DataManager...")
+    dm = DataManager(cfg)
+    data, X, y = dm.load_cached(symbol, feature_cfg, full=True)
 
     if X is None or X.empty or len(X) < MIN_SAMPLES_TO_RETRAIN:
         msg = f"[{symbol}] Not enough data to retrain: {0 if X is None else len(X)} samples"

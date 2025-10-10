@@ -154,13 +154,23 @@ def build_dynamic_features(df: pd.DataFrame, static_features: pd.DataFrame, cfg:
 
     return X
 
-def build_features(df: pd.DataFrame, cfg: FeatureConfig, symbol: str = None, timeframe_minutes: int = 5) -> pd.DataFrame:
+from src.config import Cfg # Import Cfg
+
+def build_features(df: pd.DataFrame, feature_cfg: FeatureConfig, main_cfg: Cfg, symbol: str = None, mta_df: pd.DataFrame = None, inter_market_df: pd.DataFrame = None) -> pd.DataFrame:
     """
     Original build_features function, now delegates to static and dynamic builders.
     This remains for compatibility with other scripts that may use it directly.
     """
-    static_X = build_static_features(df, symbol)
-    dynamic_X = build_dynamic_features(df, static_X, cfg, symbol)
+    pa_cfg = getattr(getattr(main_cfg, 'context_features', None), 'price_action', None)
+    mta_cfg = getattr(main_cfg.context_features, 'mta', None)
+    im_cfg = getattr(main_cfg.context_features, 'inter_market', None)
+
+    static_X = build_static_features(df, symbol, pa_cfg=pa_cfg)
+    dynamic_X = build_dynamic_features(df, static_X, feature_cfg, symbol)
+    
+    # Add contextual features
+    dynamic_X = add_contextual_features(dynamic_X, mta_df=mta_df, inter_market_df=inter_market_df, mta_cfg=mta_cfg, im_cfg=im_cfg)
+    
     return dynamic_X
 
 def make_labels(df: pd.DataFrame, horizon: int) -> pd.Series:

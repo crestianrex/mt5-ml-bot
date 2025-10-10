@@ -24,7 +24,8 @@ except Exception:
     LGBMClassifier = None
 
 # Min samples required to safely train a model and get a reliable CV score
-MIN_SAMPLES_FOR_FIT = 150
+# Raised for production / retrain safety
+MIN_SAMPLES_FOR_FIT = 1000
 
 class MLStrategy:
     def __init__(self, model="lgbm", random_state: int = 42, calibrate: bool = True, cv_samples_per_split: int = 300, **kwargs):

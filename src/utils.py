@@ -9,6 +9,7 @@ import pandas as pd
 from src.features import FeatureConfig, build_static_features, build_dynamic_features, add_contextual_features
 from src.labels import binary_up_down
 from src.ensemble import Ensemble
+from src import data_manager
 
 MODEL_DIR = "models"
 PARAMS_DIR = "optuna_params"
@@ -49,62 +50,71 @@ def get_training_data(cfg: Cfg, symbol: str, feature_cfg: FeatureConfig, count: 
     """
     New centralized data pipeline.
     - If build_dynamic is True, returns (data, X, y) for trainers/backtesters.
-    - If build_dynamic is False, returns (static_features, y, df) for the tuner.
+    - If build_dynamic is False, returns (X, y, df) for the tuner.
     """
     fetch_count = None if load_all_data else (count if count is not None else cfg.history_bars)
 
-    # --- 1. Select Data Source ---
-    if sys.platform != "win32" and source == "mt5":
-        logger.warning(f"MT5 is not supported on {sys.platform}. Switching to 'csv' data source.")
-        source = "csv"
-    
-    if source == "mt5":
-        from src.data import fetch_bars, merge_features_labels
-    elif source == "csv":
-        from src.data_colab import fetch_bars, merge_features_labels
-    else:
-        raise ValueError(f"Unknown data source: {source}")
+    # --- 1. Initialize DataManager ---
+    dm = data_manager.DataManager(cfg)
 
     # --- 2. Fetch All Dataframes ---
-    logger.info(f"[{symbol}] Fetching primary data ({fetch_count or 'all'} bars, {cfg.timeframe}) from {source.upper()}...")
-    df = fetch_bars(symbol, cfg.timeframe, fetch_count)
+    logger.info(f"[{symbol}] Fetching primary data ({fetch_count or 'all'} bars, {cfg.timeframe}) from {cfg.data_source.upper()}...")
+    if cfg.data_source == "csv":
+        df = dm.load_local_history(symbol, cfg.timeframe, count=fetch_count)
+    elif cfg.data_source == "mt5":
+        df = dm._fetch_bars_from_mt5_chunked(symbol, cfg.timeframe, fetch_count)
+    else:
+        raise ValueError(f"Unknown data source: {cfg.data_source}")
+
     if df is None or df.empty:
         return pd.DataFrame(), pd.DataFrame(), pd.Series(dtype="float64")
 
     mta_df = None
     if cfg.context_features.mta.enabled:
-        logger.info(f"[{symbol}] Fetching MTA data ({fetch_count or 'all'} bars, {cfg.context_features.mta.timeframe})...")
-        mta_df = fetch_bars(symbol, cfg.context_features.mta.timeframe, fetch_count)
+        logger.info(f"[{symbol}] Fetching MTA data ({fetch_count or 'all'} bars, {cfg.context_features.mta.timeframe}) from {cfg.data_source.upper()}...")
+        if cfg.data_source == "csv":
+            mta_df = dm.load_local_history(symbol, cfg.context_features.mta.timeframe, count=fetch_count)
+        elif cfg.data_source == "mt5":
+            mta_df = dm._fetch_bars_from_mt5_chunked(symbol, cfg.context_features.mta.timeframe, fetch_count)
+        else:
+            raise ValueError(f"Unknown data source: {cfg.data_source}")
+        if mta_df.empty:
+            logger.warning(f"[{symbol}] No MTA data fetched for timeframe {cfg.context_features.mta.timeframe}.")
+            mta_df = None
 
     inter_market_df = None
     if cfg.context_features.inter_market.enabled:
         im_sym = cfg.context_features.inter_market.symbol
-        logger.info(f"[{symbol}] Fetching Inter-Market data for {im_sym} ({fetch_count or 'all'} bars, {cfg.timeframe})...")
-        inter_market_df = fetch_bars(im_sym, cfg.timeframe, fetch_count)
+        logger.info(f"[{symbol}] Fetching Inter-Market data for {im_sym} ({fetch_count or 'all'} bars, {cfg.timeframe}) from {cfg.data_source.upper()}...")
+        if cfg.data_source == "csv":
+            inter_market_df = dm.load_local_history(im_sym, cfg.timeframe, count=fetch_count)
+        elif cfg.data_source == "mt5":
+            inter_market_df = dm._fetch_bars_from_mt5_chunked(im_sym, cfg.timeframe, fetch_count)
+        else:
+            raise ValueError(f"Unknown data source: {cfg.data_source}")
+        if inter_market_df.empty:
+            logger.warning(f"[{symbol}] No Inter-Market data fetched for symbol {im_sym}.")
+            inter_market_df = None
 
     # --- 3. Build Feature Set ---
     logger.info(f"[{symbol}] Building full feature set...")
-    df = add_contextual_features(
-        df, 
-        mta_df=mta_df, 
-        inter_market_df=inter_market_df, 
-        mta_cfg=cfg.context_features.mta, 
-        im_cfg=cfg.context_features.inter_market
-    )
     
+    # Build all features using the unified build_features function
+    X = build_features(df.copy(), feature_cfg, cfg, symbol=symbol, mta_df=mta_df, inter_market_df=inter_market_df)
     y = binary_up_down(df, cfg.prediction_horizon)
-    static_features = build_static_features(df, symbol=symbol, pa_cfg=cfg.context_features.price_action)
+
+    # Align X and y by index
+    aligned_idx = X.index.intersection(y.index)
+    X = X.loc[aligned_idx]
+    y = y.loc[aligned_idx]
 
     if not build_dynamic:
         # Return the intermediate artifacts needed by the tuner
-        logger.info(f"[{symbol}] Data pipeline complete for tuner. Returning static features and base df.")
-        return static_features, y, df
+        logger.info(f"[{symbol}] Data pipeline complete for tuner. Returning features and labels.")
+        return X, y, df # Return X, y, df for consistency
 
-    # --- 4. Build Final Features (for trainer/backtester) ---
-    dynamic_features = build_dynamic_features(df, static_features, feature_cfg, symbol)
-    
-    X = dynamic_features
-    data = merge_features_labels(df, X, y)
+    # For trainer/backtester, X and y are already built
+    data = data_manager.merge_features_labels(df, X, y)
 
     if data is None or data.empty:
         return pd.DataFrame(), X if X is not None else pd.DataFrame(), y if y is not None else pd.Series(dtype="float64")

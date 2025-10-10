@@ -105,8 +105,53 @@ class MonitoringCfg:
     telegram_chat_id: Optional[str] = None
 
 @dataclass
+class FetchCfg:
+    initial_fetch_bars: int = 30000
+    save_raw_data_locally: bool = True
+    raw_data_dir: str = "data/historical_data"
+    retrain_in_background: bool = True
+    retrain_time_utc: Optional[str] = None  # "HH:MM" format or None
+
+@dataclass
+class ThompsonSamplingCfg:
+    enabled: bool = True
+    atr_grid: List[float] = field(default_factory=lambda: [0.6, 0.8, 1.0, 1.25, 1.5])
+    min_prob_grid: List[float] = field(default_factory=lambda: [0.51, 0.55, 0.60])
+    prior_mean: float = 0.0
+    prior_var: float = 1.0
+    obs_var: float = 1.0
+    decay: float = 0.995
+    reward_normalization_factor: float = 1000.0
+    rule_rolling_window: int = 100
+    vol_threshold: float = 0.0005
+    dd_cut_multiplier: float = 2.0
+    consec_loss_cut: float = 0.2
+    state_file: str = "ts_risk_controller_state.json"
+
+    # NEW fields
+    contextual_enabled: bool = False           # Toggle contextual bandit
+    context_dim: int = 9                      # dim of context vector if contextual_enabled
+    min_visits_for_exploration: int = 5        # number of visits before arm is considered "known"
+    exploration_risk_mult: float = 0.5         # fraction of normal risk to use for exploratory arms
+    warmstart_weight: float = 1.0              # how strongly to weight backtest priors when merging (1.0 = equal)
+
+    # Adaptive Grid Configuration
+    adaptive_grids_enabled: bool = False
+    adaptation_interval_updates: int = 500
+    adaptation_refinement_factor: float = 0.3
+    min_grid_size: int = 5
+    max_grid_size: int = 20
+
+    # Bandit Reset Configuration
+    bandit_reset_enabled: bool = False
+    reset_on_drawdown_percent: float = 0.20
+    reset_on_consecutive_losses: int = 10
+    reset_on_low_ensemble_auc: float = 0.52
+    reset_cooldown_hours: float = 24.0
+
+@dataclass
 class Cfg:
-    symbols: List[str] = field(default_factory=lambda: ["EURUSD"])
+    symbols: List[str] = field(default_factory=lambda: ["EURUSD#"])
     timeframe: str = "M5"
     history_bars: int = 2000
     retrain_every_bars: int = 250
@@ -117,6 +162,7 @@ class Cfg:
     optuna_n_trials: int = 150
     optuna_pruning_interval: int = 100 # New: Interval for Optuna pruning checks
     n_jobs: int = -1 # Number of parallel jobs for tuning. -1 means all available CPU cores.
+    initial_equity: float = 100.0 # New: Initial equity for backtesting
     features: FeatureCfg = field(default_factory=FeatureCfg)
     context_features: ContextFeaturesCfg = field(default_factory=ContextFeaturesCfg)
     models: List[Dict[str, Any]] = field(default_factory=list)
@@ -126,6 +172,10 @@ class Cfg:
     watchdog: WatchdogCfg = field(default_factory=WatchdogCfg)
     reoptimization_triggers: ReoptimizationTriggersCfg = field(default_factory=ReoptimizationTriggersCfg)
     monitoring: MonitoringCfg = field(default_factory=MonitoringCfg)
+    thompson_sampling: ThompsonSamplingCfg = field(default_factory=ThompsonSamplingCfg)
+    fetch: FetchCfg = field(default_factory=FetchCfg)
+    min_samples_for_ensemble: int = 1000
+    force_retrain_on_startup: bool = False # New: Force retraining of all models on bot startup
 
     def timeframe_seconds(self) -> Optional[int]:
         """ Convert timeframe string like 'M5', 'H1', 'D1' to seconds.
@@ -221,6 +271,22 @@ class Cfg:
             logger.warning(f"Invalid monitoring config in YAML: {e}; using defaults.")
             mon_obj = MonitoringCfg()
 
+        # parse fetch block if present (bootstrap + local caching)
+        try:
+            fetch_raw = raw.get("fetch", {}) or {}
+            fetch_obj = FetchCfg(**fetch_raw) if fetch_raw else FetchCfg()
+        except Exception as e:
+            logger.warning(f"Invalid fetch config in YAML: {e}; using defaults.")
+            fetch_obj = FetchCfg()
+
+        # parse thompson_sampling block if present
+        try:
+            ts_raw = raw.get("thompson_sampling", {}) or {}
+            ts_obj = ThompsonSamplingCfg(**ts_raw) if ts_raw else ThompsonSamplingCfg()
+        except Exception as e:
+            logger.warning(f"Invalid thompson_sampling config in YAML: {e}; using defaults.")
+            ts_obj = ThompsonSamplingCfg()
+
         return Cfg(
             symbols=raw.get("symbols", ["EURUSD"]),
             timeframe=raw.get("timeframe", "M5"),
@@ -233,6 +299,7 @@ class Cfg:
             optuna_n_trials=int(raw.get("optuna_n_trials", 100)),
             optuna_pruning_interval=int(raw.get("optuna_pruning_interval", 100)), # New
             n_jobs=int(raw.get("n_jobs", -1)), # New
+            initial_equity=float(raw.get("initial_equity", 100.0)),
             features=features_obj,
             context_features=context_features_obj,
             models=raw.get("models", []),
@@ -242,4 +309,8 @@ class Cfg:
             watchdog=watchdog_obj,
             reoptimization_triggers=reopt_obj,
             monitoring=mon_obj,
+            thompson_sampling=ts_obj,
+            fetch=fetch_obj,
+            min_samples_for_ensemble=int(raw.get("min_samples_for_ensemble", 1000)),
+            force_retrain_on_startup=bool(raw.get("force_retrain_on_startup", False)),
         )

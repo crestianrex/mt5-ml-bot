@@ -1,4 +1,4 @@
-# /home/kyani/Desktop/new/mt5-ml-bot/src/data_colab.py
+# src/data_colab.py
 from __future__ import annotations
 import pandas as pd
 import os

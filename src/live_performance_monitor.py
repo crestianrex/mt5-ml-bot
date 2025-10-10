@@ -141,11 +141,22 @@ class LivePerformanceMonitor:
             # 3. Potentially pause trading in main.py
             return True, reasons
         
-        return False, []    def save_state(self):
+        return False, []
+
+    def save_state(self):
         state_path = self.cfg.monitoring.monitor_state_file
         try:
-            # Convert deque to list for JSON serialization
-            closed_trades_data = [trade.__dict__ for trade in self.closed_trades]
+            # Manually build a serializable list of closed trades
+            closed_trades_data = []
+            for trade in self.closed_trades:
+                trade_data = trade.__dict__.copy()
+                # Convert datetime objects to ISO format strings
+                if 'entry_time' in trade_data and isinstance(trade_data['entry_time'], datetime.datetime):
+                    trade_data['entry_time'] = trade_data['entry_time'].isoformat()
+                if 'exit_time' in trade_data and isinstance(trade_data['exit_time'], datetime.datetime):
+                    trade_data['exit_time'] = trade_data['exit_time'].isoformat()
+                closed_trades_data.append(trade_data)
+
             equity_curve_data = [(ts.isoformat(), eq) for ts, eq in self.equity_curve]
 
             state = {
