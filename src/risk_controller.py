@@ -358,9 +358,9 @@ class RiskController:
         rule_scale = self._calculate_rule_scale(symbol, context)
 
         # Apply rule_scale to ATR-related parameters
-        atr_choice = ts_cfg.atr_grid[atr_idx] * rule_scale
+        atr_choice = sym_state.atr_grid_values[atr_idx] * rule_scale
         # For min_prob, scaling might be different or not applied directly
-        min_prob_choice = ts_cfg.min_prob_grid[min_prob_idx]
+        min_prob_choice = sym_state.min_prob_grid_values[min_prob_idx]
 
         # Note: For trailing_atr_mult, we can either optimize it with its own bandit
         # or scale it based on atr_choice or rule_scale. For simplicity, let's scale it with rule_scale
@@ -418,14 +418,14 @@ class RiskController:
 
         # 1. Compute normalized reward (Sharpe-like: return per unit of risk)
         reward = 0.0
-        if trade.profit is not None and trade.risk_fraction is not None and trade.risk_fraction > 0 and trade.exit_equity is not None and trade.exit_equity > 0:
+        if trade.pnl is not None and trade.risk_fraction is not None and trade.risk_fraction > 0 and trade.exit_equity is not None and trade.exit_equity > 0:
             # Calculate return per unit of risk
-            raw_reward = trade.profit / (trade.exit_equity * trade.risk_fraction)
+            raw_reward = trade.pnl / (trade.exit_equity * trade.risk_fraction)
             # Apply log utility and normalize
             shaped = np.sign(raw_reward) * np.log1p(abs(raw_reward))
             reward = float(np.clip(shaped / ts_cfg.reward_normalization_factor, -5.0, 5.0))
-        elif trade.profit is not None and trade.entry_equity is not None and trade.entry_equity > 0: # Fallback to simple PnL/Equity if risk_fraction is not available or zero
-            raw_reward = trade.profit / trade.entry_equity
+        elif trade.pnl is not None and trade.entry_equity is not None and trade.entry_equity > 0: # Fallback to simple PnL/Equity if risk_fraction is not available or zero
+            raw_reward = trade.pnl / trade.entry_equity
             shaped = np.sign(raw_reward) * np.log1p(abs(raw_reward))
             reward = float(np.clip(shaped / ts_cfg.reward_normalization_factor, -5.0, 5.0))
         
@@ -446,10 +446,10 @@ class RiskController:
             logger.debug(f"[{symbol}] Consecutive loss penalty applied: -{penalty:.4f} (Consecutive Losses: {sym_state.consecutive_losses})")
 
         # Apply win rate reward / loss penalty
-        if ts_cfg.enable_win_rate_reward and trade.profit > 0:
+        if ts_cfg.enable_win_rate_reward and trade.pnl > 0:
             reward += ts_cfg.win_rate_reward_factor
             logger.debug(f"[{symbol}] Win rate bonus applied: +{ts_cfg.win_rate_reward_factor:.4f}")
-        elif ts_cfg.enable_loss_penalty and trade.profit <= 0:
+        elif ts_cfg.enable_loss_penalty and trade.pnl <= 0:
             reward -= ts_cfg.loss_penalty_factor
             logger.debug(f"[{symbol}] Loss penalty applied: -{ts_cfg.loss_penalty_factor:.4f}")
 
@@ -550,6 +550,7 @@ class RiskController:
                 if new_atr_grid != sym_state.atr_grid_values:
                     logger.info(f"[{symbol}] Adapting ATR grid. Old: {sym_state.atr_grid_values} -> New: {new_atr_grid}")
                     old_atr_bandit = sym_state.atr_bandit
+                    old_atr_grid = sym_state.atr_grid_values
                     sym_state.atr_grid_values = new_atr_grid
                     sym_state.atr_bandit = ThompsonBandit(
                         num_arms=len(new_atr_grid), prior_mean=ts_cfg.prior_mean,
@@ -579,6 +580,7 @@ class RiskController:
                 if new_min_prob_grid != sym_state.min_prob_grid_values:
                     logger.info(f"[{symbol}] Adapting MinProb grid. Old: {sym_state.min_prob_grid_values} -> New: {new_min_prob_grid}")
                     old_min_prob_bandit = sym_state.min_prob_bandit
+                    old_min_prob_grid = sym_state.min_prob_grid_values
                     sym_state.min_prob_grid_values = new_min_prob_grid
                     sym_state.min_prob_bandit = ThompsonBandit(
                         num_arms=len(new_min_prob_grid), prior_mean=ts_cfg.prior_mean,

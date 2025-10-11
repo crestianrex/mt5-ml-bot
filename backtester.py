@@ -49,7 +49,7 @@ class HybridBacktester:
         self.risk_controller = RiskController(cfg) # NEW: Instantiate RiskController
         self.ts_param_history = [] # NEW: To store Thompson Sampling parameter evolution
         self.save_state_every_bars = getattr(cfg, "save_ts_state_every_bars", 500)
-        ts_ts = datetime.datetime.utcnow().strftime("%Y%m%dT%H%M%SZ")
+        ts_ts = datetime.datetime.now(datetime.timezone.utc).strftime("%Y%m%dT%H%M%SZ")
         self.backtest_ts_state_file = f"results/ts_risk_controller_state_backtest_{ts_ts}.json"
         self.ts_history_csv = f"results/ts_param_evolution_backtest_{ts_ts}.csv"
         os.makedirs("results", exist_ok=True)
@@ -60,78 +60,6 @@ class HybridBacktester:
         self.cost_in_points = getattr(cfg.risk, 'transaction_cost_pips', 0.0) * PIP_SIZE_ASSUMPTION
         if self.cost_in_points > 0:
             logger.info(f"Applying transaction cost: {getattr(cfg.risk, 'transaction_cost_pips', 0.0)} pips per trade.")
-
-    def _manage_trailing_stops(self, sym: str, row: pd.Series, atr: float):
-        """Simulated version of the live trailing stop logic."""
-        risk_cfg = self.risk_manager.risk_cfg
-        if not (risk_cfg.breakeven_at_1R or risk_cfg.trailing_atr_mult > 0):
-            return # No trailing logic enabled
-
-        for pos in [p for p in self.positions if p.symbol == sym and p.status == "open"]:
-            price = row["close"]
-            new_sl = pos.sl
-
-            # --- Breakeven Logic ---
-            if risk_cfg.breakeven_at_1R:
-                one_r_price_move = risk_cfg.atr_multiplier_sl * pos.atr
-                if pos.direction == "long" and price >= pos.entry_price + one_r_price_move and pos.sl < pos.entry_price:
-                    new_sl = pos.entry_price
-                    logger.info(f"[{sym}] Moving SL to breakeven for long position at {new_sl:.5f}")
-                elif pos.direction == "short" and price <= pos.entry_price - one_r_price_move and pos.sl > pos.entry_price:
-                    new_sl = pos.entry_price
-                    logger.info(f"[{sym}] Moving SL to breakeven for short position at {new_sl:.5f}")
-
-            # --- ATR Trailing Logic ---
-            if risk_cfg.trailing_atr_mult > 0:
-                trailing_atr_dist = atr * risk_cfg.trailing_atr_mult
-                if pos.direction == "long":
-                    potential_new_sl = price - trailing_atr_dist
-                    if potential_new_sl > new_sl:
-                        new_sl = potential_new_sl
-                        logger.debug(f"[{sym}] Trailing SL for long position to {new_sl:.5f}")
-                else: # Short position
-                    potential_new_sl = price + trailing_atr_dist
-                    if potential_new_sl < new_sl:
-                        new_sl = potential_new_sl
-                        logger.debug(f"[{sym}] Trailing SL for short position to {new_sl:.5f}")
-            
-            pos.sl = new_sl
-
-    def _update_positions(self, sym, row):
-        """Check open positions for SL/TP, calculate PnL, and update equity."""
-        closed_trades_this_cycle = [] # NEW: Collect trades closed in this cycle
-        for pos in [p for p in self.positions if p.symbol==sym and p.status=="open"]:
-            price = row["close"]
-            exit_reason = None
-            
-            if pos.direction == "long":
-                if price <= pos.sl:
-                    exit_reason = "Stop Loss"
-                elif price >= pos.tp:
-                    exit_reason = "Take Profit"
-            elif pos.direction == "short":
-                if price >= pos.sl:
-                    exit_reason = "Stop Loss"
-                elif price <= pos.tp:
-                    exit_reason = "Take Profit"
-
-            if exit_reason:
-                gross_pnl = ((price - pos.entry_price) * pos.lots * CONTRACT_SIZE) if pos.direction == "long" else ((pos.entry_price - price) * pos.lots * CONTRACT_SIZE)
-                transaction_cost = self.cost_in_points * pos.lots * CONTRACT_SIZE
-                net_pnl = gross_pnl - transaction_cost
-                
-                # Pass current equity to pos.close for reward normalization
-                pos.close(price, row.name, net_pnl, self.equity + net_pnl) # NEW: Pass exit_equity
-                self.equity += net_pnl
-                closed_trades_this_cycle.append(pos) # NEW: Add to list
-                logger.info(
-                    f"[{sym}] Closed {pos.direction} position at {price:.5f} due to {exit_reason}. "
-                    f"Entry: {pos.entry_price:.5f}, PnL: {net_pnl:.2f}, Equity: {self.equity:.2f}"
-                )
-        
-        # NEW: Update RiskController for each closed trade
-        for trade in closed_trades_this_cycle:
-            self.risk_controller.update_after_trade(sym, trade)
     
     def _perform_retraining(self, sym: str, bar_time: pd.Timestamp, i: int, data: pd.DataFrame, X: pd.DataFrame):
         """
@@ -177,9 +105,22 @@ class HybridBacktester:
             last_features = X.iloc[[i]]
             atr = X["atr_14"].iloc[i]
 
-            # Manage existing positions first
-            self._manage_trailing_stops(sym, current_row, atr)
-            self._update_positions(sym, current_row)
+            # Manage existing positions first 
+            closed_trades = self.risk_manager.manage_open_positions(sym, atr, use_mt5=False, sim_positions=self.positions, current_row=current_row)
+            if closed_trades:
+                for trade in closed_trades:
+                    # Calculate PnL for the closed trade
+                    gross_pnl = ((trade.exit_price - trade.entry_price) * trade.lots * CONTRACT_SIZE) if trade.direction == "long" else ((trade.entry_price - trade.exit_price) * trade.lots * CONTRACT_SIZE)
+                    transaction_cost = self.cost_in_points * trade.lots * CONTRACT_SIZE
+                    net_pnl = gross_pnl - transaction_cost
+                    trade.pnl = net_pnl
+                    trade.exit_equity = self.equity + net_pnl
+                    self.equity += net_pnl
+                    logger.info(
+                        f"[{sym}] Closed {trade.direction} position at {trade.exit_price:.5f}. "
+                        f"Entry: {trade.entry_price:.5f}, PnL: {net_pnl:.2f}, Equity: {self.equity:.2f}"
+                    )
+                    self.risk_controller.update_after_trade(sym, trade)
 
             # --- Drawdown and Cooldown Check ---
             risk_mgr._update_equity_peak(self.equity)
@@ -252,7 +193,7 @@ class HybridBacktester:
             context = {
                 "vol": atr,
                 "equity": self.equity,
-                "peak_equity": self.risk_manager.peak_equity,
+                "peak_equity": self.risk_manager.equity_peak,
                 "ensemble_auc": ens.ensemble_cv_auc_, # Pass current model confidence
                 "adx": float(last_features["adx"].iloc[0]) if "adx" in last_features.columns else 0.0,
                 "macd_diff": float(last_features["macd_diff"].iloc[0]) if "macd_diff" in last_features.columns else 0.0,
@@ -451,7 +392,7 @@ if __name__ == "__main__":
     cfg = Cfg.from_yaml("config.yaml")
     setup_logging(level=cfg.logging["level"], to_file=cfg.logging["to_file"], rotate=cfg.logging["rotate"], retention=cfg.logging["retention"])
     
-    cfg.thompson_sampling.state_file = f"ts_risk_controller_state_backtest_{datetime.datetime.utcnow().strftime('%Y%m%dT%H%M%SZ')}.json"
+    cfg.thompson_sampling.state_file = f"ts_risk_controller_state_backtest_{datetime.datetime.now(datetime.timezone.utc).strftime('%Y%m%dT%H%M%SZ')}.json"
 
     
     bt = HybridBacktester(cfg)

@@ -46,7 +46,7 @@ def retrain_symbol(cfg: Cfg, symbol: str, dry_run: bool = True) -> dict:
     # Use the modern DataManager to load all available training data
     logger.info(f"[{symbol}] Loading full history via DataManager...")
     dm = DataManager(cfg)
-    data, X, y = dm.load_cached(symbol, feature_cfg, full=True)
+    data, X, y = dm.load_cached(symbol, feature_cfg)
 
     if X is None or X.empty or len(X) < MIN_SAMPLES_TO_RETRAIN:
         msg = f"[{symbol}] Not enough data to retrain: {0 if X is None else len(X)} samples"

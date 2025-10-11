@@ -207,3 +207,19 @@ class DataManager:
         y = y.loc[aligned_idx]
 
         return X, y
+
+    def merge_features_labels(self, df: pd.DataFrame, X: pd.DataFrame, y: pd.Series) -> pd.DataFrame:
+        """Merges primary data with features and labels, returning a unified dataframe."""
+        if X.empty or y.empty:
+            return pd.DataFrame()
+
+        # Merge features
+        data = df.merge(X, left_index=True, right_index=True, how="inner")
+        
+        # Merge labels
+        data = data.merge(y.to_frame(name='y'), left_index=True, right_index=True, how="inner")
+        
+        # Drop rows with NaN values that might have been introduced
+        data.dropna(inplace=True)
+        
+        return data

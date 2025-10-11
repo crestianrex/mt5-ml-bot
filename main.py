@@ -393,6 +393,9 @@ def run(dry_run: bool = False):
                         atr = 0.0
                     last_features = X.iloc[[-1]] if (X is not None and not X.empty) else pd.DataFrame()
 
+                    # NEW: Call risk.manage_open_positions to update SL/TP for this symbol
+                    risk.manage_open_positions(sym, atr)
+
                     # Update risk manager peak using current equity
                     risk._update_equity_peak(equity)
 
