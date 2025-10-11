@@ -9,6 +9,7 @@ import yaml
 from functools import partial
 from joblib import Parallel, delayed
 import traceback # Added for detailed error logging
+from tqdm import tqdm
 
 from src.config import Cfg, RiskCfg
 from src.features import FeatureConfig, build_dynamic_features
@@ -49,10 +50,10 @@ def suggest_params(trial, prefix: str, param_ranges: dict):
                 else:
                     params[k] = trial.suggest_float(f"{prefix}_{k}", v[0], v[1])
         else:
-            params[k] = v
+            params[k] = trial.suggest_categorical(f"{prefix}_{k}", v) if isinstance(v, list) else v
     return params
 
-def objective(trial, df: pd.DataFrame, y: pd.Series, static_features: pd.DataFrame, symbol: str):
+def objective(trial, df: pd.DataFrame, y: pd.Series, static_features: pd.DataFrame, symbol: str, pbar: tqdm = None):
     try:
         # --- 1. Suggest Feature Parameters ---
         feature_params_raw = suggest_params(trial, "feature", yaml_cfg.get("features", {}))
@@ -105,6 +106,8 @@ def objective(trial, df: pd.DataFrame, y: pd.Series, static_features: pd.DataFra
                 raise optuna.TrialPruned()
 
         mean_auc = float(pd.Series(aucs).mean())
+        if pbar:
+            pbar.update(1)
         return 1 - mean_auc
 
     except optuna.exceptions.TrialPruned as e:
@@ -112,6 +115,8 @@ def objective(trial, df: pd.DataFrame, y: pd.Series, static_features: pd.DataFra
     except Exception as e:
         tb_str = traceback.format_exc()
         logger.error(f"--- Trial Failed ---\nError: {e}\nTraceback:\n{tb_str}")
+        if pbar:
+            pbar.update(1)
         return float('inf')
 
 def run_tuning_for_symbol(sym: str):
@@ -141,10 +146,18 @@ def run_tuning_for_symbol(sym: str):
     pruner = optuna.pruners.MedianPruner()
     study = optuna.create_study(direction="minimize", study_name=study_name, storage=storage_path, load_if_exists=True, pruner=pruner)
     
+
+
     n_trials = yaml_cfg.get("optuna_n_trials", 100)
-    study.optimize(objective_partial, n_trials=n_trials)
+    with tqdm(total=n_trials, desc=f"Tuning {sym}") as pbar:
+        objective_partial = partial(objective, df=df, y=y, static_features=static_features, symbol=sym, pbar=pbar)
+        study.optimize(objective_partial, n_trials=n_trials)
 
     # --- 5. Process and Save Best Parameters ---
+    if study.best_trial is None:
+        logger.warning(f"[{sym}] No trials completed successfully for {sym}. Skipping parameter saving.")
+        return
+
     best_params_flat = study.best_params
     best_params_structured = {"features": {}, "models": {}}
 

@@ -3,7 +3,7 @@
 # --- General Settings ---
 use_gpu: false # Master switch to enable GPU acceleration for supported models (lgbm, xgb)
 magic_number: 424242 # Unique ID for this bot's trades
-data_source: mt5 # "mt5" or "csv". Automatically switches to csv on non-windows
+data_source: csv # "mt5" or "csv". Automatically switches to csv on non-windows
 
 # --- Optuna Tuning Specifics ---
 optuna_n_trials: 150  # 150
@@ -34,7 +34,7 @@ fetch:
 ensemble_training:
   min_samples_for_ensemble: 1000   # don’t fit ensemble if fewer samples available
 
-# --- Symbols & timeframe ---
+# --- Symbols & timeframe --- "GOLDm#", "EURUSDm#", "GBPUSDm#"
 # historical_data symbols for .csv needed: M5-EURUSD#, H1-EURUSD#, and M5-USDX-DEC25
 symbols: ["EURUSD#", "GBPUSD#", "USDJPY#"] #"EURUSD#", "GBPUSD#", "USDJPY#", "USDX-DEC25"
 timeframe: "M5"            # One of: M1, M5, M15, M30, H1, H4
@@ -55,12 +55,12 @@ features:
 # --- Context Features (static, not tuned by optuna) ---
 context_features:
   mta:
-    enabled: false
+    enabled: true
     timeframe: "H1"
     ema_period: 50
     rsi_period: 14
   inter_market:
-    enabled: false
+    enabled: true
     symbol: "USDX-DEC25" # Make sure this symbol is available in your data source
     roc_lags: [5, 21, 63]
   price_action:
@@ -173,7 +173,7 @@ risk:
   atr_multiplier_sl: 1.5
   atr_multiplier_tp: 2.5
   breakeven_at_1R: true #false disable
-  trailing_atr_mult: 1.0 #0.0 disable 1.0 enable
+  trailing_atr_mult: 0.0 #0.0 disable 1.0 enable
   min_prob_long: 0.55
   min_prob_short: 0.55
   block_on_drawdown: 1.0         # 0.1 pause if drawdown from equity peak exceeds 10%     #disable 1.0
@@ -197,7 +197,7 @@ logging:
 
 # --- Monitoring / Safety ---
 watchdog:
-  enabled: true
+  enabled: false
   max_consecutive_losses: 5      # 5 Stop trading if more than N losses in a row
   cooldown_hours: 1              # 1 Pause trading for X hours if triggered
 
@@ -205,9 +205,6 @@ watchdog:
 monitoring:
   lookback_days: 30 # Period over which to calculate performance metrics
   monitor_state_file: "monitor_state.json" # File to save LivePerformanceMonitor state
-  # For security, set your Telegram credentials as environment variables:
-  # export TELEGRAM_BOT_TOKEN="your_token_here"
-  # export TELEGRAM_CHAT_ID="your_chat_id_here"
   telegram_bot_token: "" # Your Telegram Bot Token
   telegram_chat_id: "" # Your Telegram Chat ID (can be negative for groups)
 

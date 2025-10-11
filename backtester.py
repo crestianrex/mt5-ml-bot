@@ -131,14 +131,15 @@ class HybridBacktester:
                     risk_mgr._trigger_cooldown(now=now_utc)
 
             # --- Consecutive Loss Check ---
-            max_losses = getattr(risk_mgr.watchdog_cfg, "max_consecutive_losses", None)
-            if max_losses is not None and max_losses > 0:
-                consecutive_losses = self._count_consecutive_losses_backtest()
-                if consecutive_losses >= max_losses:
-                    if risk_mgr.cooldown_until is None:
-                        logger.warning(f"[{sym}][{bar_time}] Watchdog: consecutive losses {consecutive_losses} >= threshold {max_losses}. Triggering cooldown.")
-                        now_utc = bar_time.to_pydatetime().replace(tzinfo=datetime.timezone.utc)
-                        risk_mgr._trigger_cooldown(now=now_utc)
+            if hasattr(self.cfg, 'watchdog') and self.cfg.watchdog.enabled:
+                max_losses = getattr(risk_mgr.watchdog_cfg, "max_consecutive_losses", None)
+                if max_losses is not None and max_losses > 0:
+                    consecutive_losses = self._count_consecutive_losses_backtest()
+                    if consecutive_losses >= max_losses:
+                        if risk_mgr.cooldown_until is None:
+                            logger.warning(f"[{sym}][{bar_time}] Watchdog: consecutive losses {consecutive_losses} >= threshold {max_losses}. Triggering cooldown.")
+                            now_utc = bar_time.to_pydatetime().replace(tzinfo=datetime.timezone.utc)
+                            risk_mgr._trigger_cooldown(now=now_utc)
 
             now_utc = bar_time.to_pydatetime().replace(tzinfo=datetime.timezone.utc)
             if risk_mgr.cooldown_active(now=now_utc):

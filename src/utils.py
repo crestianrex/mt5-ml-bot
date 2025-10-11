@@ -9,6 +9,7 @@ import pandas as pd
 from src.features import FeatureConfig, build_features, build_static_features, build_dynamic_features, add_contextual_features
 from src.labels import binary_up_down
 from src.ensemble import Ensemble
+from src.config import Cfg
 from src import data_manager
 
 MODEL_DIR = "models"

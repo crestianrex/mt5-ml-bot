@@ -12,3 +12,5 @@ python-dotenv>=1.0
 loguru>=0.7
 optuna>=3.6
 quantstats>=0.0.62
+kaleido>=0.2.1
+tqdm>=4.66.1
