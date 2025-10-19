@@ -9,7 +9,7 @@ data_source: csv # "mt5" or "csv". Automatically switches to csv on non-windows
 optuna_n_trials: 150  # 150
 
 # --- Backtesting Settings ---
-initial_equity: 1000.0
+initial_equity: 100.0
 
 optuna_pruning_interval: 100 # New: Interval for Optuna pruning checks
 n_jobs: -1 # Number of parallel jobs for tuning. -1 means all available CPU cores.
@@ -34,12 +34,13 @@ fetch:
 ensemble_training:
   min_samples_for_ensemble: 1000   # don’t fit ensemble if fewer samples available
 
-# --- Symbols & timeframe --- "GOLDm#", "EURUSDm#", "GBPUSDm#"
+# --- Symbols & timeframe ---
 # historical_data symbols for .csv needed: M5-EURUSD#, H1-EURUSD#, and M5-USDX-DEC25
-symbols: ["EURUSD#", "GBPUSD#", "USDJPY#"] #"EURUSD#", "GBPUSD#", "USDJPY#" "USDX-DEC25"
+symbols: ["EURUSD#", "GBPUSD#", "USDJPY#"] #"EURUSD#", "GBPUSD#", "USDJPY#", "USDX-DEC25"
+# symbols: ["EURUSDm#", "GOLDm#", "GBPUSDm#"] 
 timeframe: "M5"            # One of: M1, M5, M15, M30, H1, H4
 history_bars: 36000          #6048 18000 36000 105,000
-retrain_every_bars: 360001     # ~3.5 days at M5 1000
+retrain_every_bars: 1000     # ~3.5 days at M5
 prediction_horizon: 6       # 6 Bars ahead for label (~30 min on M5)
 retraining_window_bars: 20000         # Number of recent bars for rolling window retraining. null for expanding window.
 
@@ -146,7 +147,7 @@ thompson_sampling:
   max_grid_size: 20                  # Maximum number of arms in a grid
 
   # Bandit Reset Configuration
-  bandit_reset_enabled: false
+  bandit_reset_enabled: true
   reset_on_drawdown_percent: 0.20    # Reset if equity drops X% from peak
   reset_on_consecutive_losses: 10    # Reset if X consecutive losing trades
   reset_on_low_ensemble_auc: 0.52    # Reset if ensemble AUC drops below this
@@ -169,19 +170,16 @@ risk:
     auc_ceiling: 0.65      # Same AUC ceiling as risk
 
   max_positions: 3               # Max concurrent positions
-  max_portfolio_risk: 0.03       #0.03 Total equity risk cap
+  max_portfolio_risk: 1.00       #0.03 Total equity risk cap
   atr_multiplier_sl: 1.5
   atr_multiplier_tp: 2.5
-  breakeven_at_1R: false #false disable
-  trailing_atr_mult: 0.0 #0.0 disable 1.0 enable
+  breakeven_at_1R: true
+  trailing_atr_mult: 1.0
   min_prob_long: 0.55
   min_prob_short: 0.55
   block_on_drawdown: 1.0         # 0.1 pause if drawdown from equity peak exceeds 10%     #disable 1.0
   min_auc_improvement: 0.005     # 0.005 default # minimum improvement in AUC to accept a new model
   max_drawdown_for_pruning: 1.0 # New: Max drawdown allowed before Optuna trial pruning  #disable 1.0
-  trailing_stop:
-    enabled: false
-    atr_distance: 1.5
   session_filter:
     start: "00:00"
     end: "23:59"

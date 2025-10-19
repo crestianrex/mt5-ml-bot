@@ -1,19 +1,25 @@
 # src/data.py
 from __future__ import annotations
 import pandas as pd
-import MetaTrader5 as mt5  # type: ignore
+try:
+    import MetaTrader5 as mt5  # type: ignore
+except (ModuleNotFoundError, ImportError):
+    mt5 = None
 from loguru import logger
 
 # Map human timeframe string to MT5 timeframe constants (best-effort)
-TF_MAP = {
-    "M1": getattr(mt5, "TIMEFRAME_M1", None),
-    "M5": getattr(mt5, "TIMEFRAME_M5", None),
-    "M15": getattr(mt5, "TIMEFRAME_M15", None),
-    "M30": getattr(mt5, "TIMEFRAME_M30", None),
-    "H1": getattr(mt5, "TIMEFRAME_H1", None),
-    "H4": getattr(mt5, "TIMEFRAME_H4", None),
-    "D1": getattr(mt5, "TIMEFRAME_D1", None),
-}
+if mt5:
+    TF_MAP = {
+        "M1": getattr(mt5, "TIMEFRAME_M1", None),
+        "M5": getattr(mt5, "TIMEFRAME_M5", None),
+        "M15": getattr(mt5, "TIMEFRAME_M15", None),
+        "M30": getattr(mt5, "TIMEFRAME_M30", None),
+        "H1": getattr(mt5, "TIMEFRAME_H1", None),
+        "H4": getattr(mt5, "TIMEFRAME_H4", None),
+        "D1": getattr(mt5, "TIMEFRAME_D1", None),
+    }
+else:
+    TF_MAP = {}
 
 
 def fetch_bars(symbol: str, timeframe: str, count: int = 500) -> pd.DataFrame:
@@ -21,6 +27,9 @@ def fetch_bars(symbol: str, timeframe: str, count: int = 500) -> pd.DataFrame:
     Fetch `count` bars from MT5 for `symbol` and return a DataFrame with index=time (UTC).
     Returns an empty DataFrame on error or if no data.
     """
+    if mt5 is None:
+        logger.error("MetaTrader5 is not installed. Cannot fetch bars.")
+        return pd.DataFrame()
     if count is None:
         logger.debug(f"[{symbol}] `count` is None, fetching max history (36000 bars).")
         count = 36000

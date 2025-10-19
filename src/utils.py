@@ -6,11 +6,11 @@ import sys
 import copy
 from loguru import logger
 import pandas as pd
-from src.features import FeatureConfig, build_features, build_static_features, build_dynamic_features, add_contextual_features
+from src.features import FeatureConfig, build_static_features, build_dynamic_features, add_contextual_features, build_features
 from src.labels import binary_up_down
 from src.ensemble import Ensemble
-from src.config import Cfg
 from src import data_manager
+from src.data import merge_features_labels
 
 MODEL_DIR = "models"
 PARAMS_DIR = "optuna_params"
@@ -115,7 +115,7 @@ def get_training_data(cfg: Cfg, symbol: str, feature_cfg: FeatureConfig, count: 
         return X, y, df # Return X, y, df for consistency
 
     # For trainer/backtester, X and y are already built
-    data = dm.merge_features_labels(df, X, y)
+    data = merge_features_labels(df, X, y)
 
     if data is None or data.empty:
         return pd.DataFrame(), X if X is not None else pd.DataFrame(), y if y is not None else pd.Series(dtype="float64")

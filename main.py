@@ -293,26 +293,49 @@ def run(dry_run: bool = False):
 
             # --- Process closed trades first so bandit gets rewards before opening new trades ---
             closed_trades_this_cycle = exe.check_closed_trades()
-            exe._manage_trailing_stops() # MANAGE TRAILING STOPS
-            for trade in closed_trades_this_cycle:
-                try:
-                    live_monitor.add_closed_trade(trade)
-                    risk_controller.update_after_trade(trade.symbol, trade)
-                    trade_auc = active_model_auc.get(trade.symbol, 0.5)
-                    log_metrics_to_csv({
-                        "timestamp": datetime.datetime.now(datetime.timezone.utc).isoformat(),
-                        "symbol": trade.symbol,
-                        "event_type": "trade_reward",
-                        "atr_idx": trade.atr_idx,
-                        "min_prob_idx": trade.min_prob_idx,
-                        "reward": trade.profit / max(1.0, equity),
-                        "equity": equity,
-                        "peak_equity": risk.equity_peak,
-                        "drawdown": drawdown,
-                        "ensemble_auc": trade_auc
-                    })
-                except Exception:
-                    logger.exception("Error processing closed trade.")
+
+            # --- FIX: Reconstruct sequential equity to provide accurate reward normalization ---
+            # The `equity` from account_info is after all trades in the cycle have closed.
+            # We work backwards to find the equity state before this cycle's trades.
+            if closed_trades_this_cycle:
+                # Assuming trades are sorted by close time from check_closed_trades()
+                total_profit_this_cycle = sum(t.profit for t in closed_trades_this_cycle)
+                equity_before_cycle = equity - total_profit_this_cycle
+                
+                running_equity = equity_before_cycle
+                for trade in closed_trades_this_cycle:
+                    try:
+                        # Calculate the exact equity at the moment this trade closed
+                        exit_equity = running_equity + trade.profit
+                        
+                        # Set exit_equity on the trade object so RiskController can compute accurate reward
+                        # This assumes the trade object is mutable and the controller knows to use this attribute.
+                        trade.exit_equity = exit_equity
+
+                        live_monitor.add_closed_trade(trade)
+                        risk_controller.update_after_trade(trade.symbol, trade)
+
+                        # For logging, calculate the accurate normalized reward
+                        normalized_reward = trade.profit / max(1.0, exit_equity)
+                        trade_auc = active_model_auc.get(trade.symbol, 0.5)
+                        log_metrics_to_csv({
+                            "timestamp": datetime.datetime.now(datetime.timezone.utc).isoformat(),
+                            "symbol": trade.symbol,
+                            "event_type": "trade_reward",
+                            "atr_idx": trade.atr_idx,
+                            "min_prob_idx": trade.min_prob_idx,
+                            "reward": normalized_reward,
+                            "equity": exit_equity, # Log the accurate equity
+                            "peak_equity": risk.equity_peak,
+                            "drawdown": drawdown,
+                            "ensemble_auc": trade_auc
+                        })
+
+                        # Update running_equity for the next trade in the sequence
+                        running_equity = exit_equity
+
+                    except Exception:
+                        logger.exception("Error processing closed trade.")
 
             # --- Per-symbol processing: fetch, update cache, optionally retrain, then make trade decision for that symbol ---
             for sym in cfg.symbols:
@@ -391,10 +414,11 @@ def run(dry_run: bool = False):
                         atr = float(X["atr_14"].iloc[-1]) if (X is not None and not X.empty) else 0.0
                     except Exception:
                         atr = 0.0
-                    last_features = X.iloc[[-1]] if (X is not None and not X.empty) else pd.DataFrame()
-
-                    # NEW: Call risk.manage_open_positions to update SL/TP for this symbol
+                    
+                    # --- FIX: Activate the existing live trailing stop mechanism ---
                     risk.manage_open_positions(sym, atr)
+
+                    last_features = X.iloc[[-1]] if (X is not None and not X.empty) else pd.DataFrame()
 
                     # Update risk manager peak using current equity
                     risk._update_equity_peak(equity)
@@ -426,8 +450,6 @@ def run(dry_run: bool = False):
                     atr_idx = dynamic_risk_params["atr_idx"]
                     min_prob_idx = dynamic_risk_params["min_prob_idx"]
                     rule_scale = dynamic_risk_params.get("rule_scale", 1.0)
-                    lagged_vol = dynamic_risk_params.get("lagged_vol", 0.0)
-                    vol_drawdown_interaction = dynamic_risk_params.get("vol_drawdown_interaction", 0.0)
 
                     # Log chosen parameters
                     log_metrics_to_csv({
@@ -505,7 +527,7 @@ def run(dry_run: bool = False):
                         else:
                             price = float(mt5.symbol_info_tick(sym).ask) if direction == "long" else float(mt5.symbol_info_tick(sym).bid)
                             sl, tp = risk.stop_targets(price, atr, direction, auc_score, sym, sl_mult=atr_multiplier_sl, tp_mult=atr_multiplier_tp)
-                            result = exe.trade(sym, last_features, atr, auc_score, total_open_risk, sl_mult=atr_multiplier_sl, tp_mult=atr_multiplier_tp, atr_idx=atr_idx, min_prob_idx=min_prob_idx, lagged_vol=lagged_vol, vol_drawdown_interaction=vol_drawdown_interaction)
+                            result = exe.trade(sym, last_features, atr, auc_score, total_open_risk, sl_mult=atr_multiplier_sl, tp_mult=atr_multiplier_tp, atr_idx=atr_idx, min_prob_idx=min_prob_idx)
                             # result = exe.trade(sym, X_for_ensemble, atr, auc_score, total_open_risk, sl_mult=atr_multiplier_sl, tp_mult=atr_multiplier_tp, atr_idx=atr_idx, min_prob_idx=min_prob_idx, X_for_context=X_for_context)
                             if result.ok:
                                 logger.info(f"[{sym}] Trade executed: {result.message}")
