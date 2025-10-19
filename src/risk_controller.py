@@ -424,7 +424,7 @@ class RiskController:
             # Apply log utility and normalize
             shaped = np.sign(raw_reward) * np.log1p(abs(raw_reward))
             reward = float(np.clip(shaped / ts_cfg.reward_normalization_factor, -5.0, 5.0))
-        elif trade.pnl is not None and trade.entry_equity is not None and trade.entry_equity > 0: # Fallback to simple PnL/Equity if risk_fraction is not available or zero
+        elif trade.pnl is not None and trade.exit_equity is not None and trade.exit_equity > 0: # Fallback to simple PnL/Equity if risk_fraction is not available or zero
             raw_reward = trade.pnl / trade.entry_equity
             shaped = np.sign(raw_reward) * np.log1p(abs(raw_reward))
             reward = float(np.clip(shaped / ts_cfg.reward_normalization_factor, -5.0, 5.0))
